@@ -74,16 +74,17 @@ def test_all_keep_returns_same_objects():
 
 
 def test_drop_call_stubs_pair_preserved():
-    """Index-safe + pairing-safe: dropped calls become stubs on BOTH call and result rows."""
+    """Index-safe + pairing-safe: a dropped call is never erased; its reproducible read shrinks to a note."""
     eng = make_engine()
     msgs = transcript(n_calls=2)
     patch_ask(eng, FakeAnswers(lambda c: "drop_call"))
     out = eng.compress(msgs)
     tools = [m for m in out if m.get("role") == "tool"]
-    assert all("dropped by jev-compaction" in m["content"] for m in tools)
-    # Assistant rows keep tool_calls as stubs (same id, empty args) for pairing
+    assert all("jev-compaction omitted" in m["content"] for m in tools)
+    # Assistant rows keep their tool_calls (same id, brief args) for pairing
     assistants = [m for m in out if m.get("role") == "assistant" and m.get("tool_calls")]
-    assert all(tc["function"]["arguments"] == "{}" for m in assistants for tc in m["tool_calls"])
+    assert [tc["id"] for m in assistants for tc in m["tool_calls"]] == ["c0", "c1"]
+    assert all("cat f" in tc["function"]["arguments"] for m in assistants for tc in m["tool_calls"])
     assert out[0]["role"] == "system" and out[-1]["content"] == "Summarize the results."
     assert len(out) == len(msgs)
 
@@ -95,7 +96,7 @@ def test_drop_result_truncates_but_keeps_row():
     out = eng.compress(msgs)
     tool_rows = [m for m in out if m.get("role") == "tool"]
     assert len(tool_rows) == 2, "rows stay when only the result is dropped"
-    assert all("jev truncated" in m["content"] for m in tool_rows)
+    assert all("jev-compaction omitted" in m["content"] for m in tool_rows)
 
 
 def test_mixed_decisions_partition():
@@ -106,16 +107,11 @@ def test_mixed_decisions_partition():
     tools = [m for m in out if m.get("role") == "tool"]
     assert len(tools) == 3, "index-safe: all tool rows preserved"
     kept = [m for m in tools if "jev" not in m["content"]]
-    truncated = [m for m in tools if "jev truncated" in m["content"]]
-    dropped = [m for m in tools if "dropped by jev-compaction" in m["content"]]
-    assert len(kept) == 1 and len(truncated) == 1 and len(dropped) == 1
-    # Pairing: dropped call's assistant keeps stub with same id
+    reduced = [m for m in tools if "jev-compaction omitted" in m["content"]]
+    assert len(kept) == 1 and len(reduced) == 2
+    # Pairing: every call keeps its assistant row with the same id, dropped ones included
     asst = [m for m in out if m.get("role") == "assistant" and m.get("tool_calls")]
-    dropped_ids = {"t3"}
-    for m in asst:
-        for tc in m["tool_calls"]:
-            if tc["id"] in dropped_ids:
-                assert tc["function"]["arguments"] == "{}", "dropped call args must be empty"
+    assert [tc["id"] for m in asst for tc in m["tool_calls"]] == ["c0", "c1", "c2"]
 
 
 # ---------- negative controls ----------
@@ -135,7 +131,7 @@ def test_jev_failure_falls_back_and_cools():
     eng = make_engine()
     patch_ask(eng, FakeAnswers(lambda c: "keep", fail_on="t2"))
     eng.compress(transcript(n_calls=3))
-    assert eng.last_stats["mode"] == "preserve"
+    assert eng.last_stats["mode"] == "fallback"
     assert eng._cooling(), "failure arms the backoff"
     assert eng.should_compress(10**9) is False, "cooling engine must not re-fire"
 
@@ -156,7 +152,7 @@ def test_malformed_answer_raises_into_fallback():
         out = eng.compress(transcript(n_calls=1))
     finally:
         jev._http_post_json = original_http
-    assert eng.last_stats["mode"] == "preserve", "NaN must be rejected by the engine guard"
+    assert eng.last_stats["mode"] == "fallback", "NaN must be rejected by the engine guard"
 
 
 def test_unpaired_tool_result_is_untouched():
@@ -388,14 +384,19 @@ def test_threshold_tokens_cap_bounds_trigger():
 
 # ---------- P0-3/P0-4/P0-5 regression (v0.3.2) ----------
 
-def test_fail_open_preserves_original():
-    """Jev failure must return original messages unchanged (no destructive fallback)."""
+def test_jev_failure_falls_back_without_erasing():
+    """Jev failure: the deterministic fallback reduces results by the fact rules; nothing is erased,
+    nothing is summarized, and the caller's list is not mutated."""
     eng = make_engine()
     msgs = transcript(n_calls=3)
+    original = copy.deepcopy(msgs)
     patch_ask(eng, FakeAnswers(lambda c: "keep", fail_on="t2"))
     out = eng.compress(msgs)
-    assert out == msgs, "fail-open must return byte-identical original"
-    assert eng.last_stats["mode"] == "preserve"
+    assert msgs == original, "input must not be mutated"
+    assert eng.last_stats["mode"] == "fallback"
+    assert [m["role"] for m in out] == [m["role"] for m in msgs], "every row stays"
+    assert [m.get("tool_call_id") for m in out] == [m.get("tool_call_id") for m in msgs]
+    assert all("jev-compaction omitted" in m["content"] for m in out if m.get("role") == "tool")
 
 
 def test_fallback_prune_still_available_standalone():

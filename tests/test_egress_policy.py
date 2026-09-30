@@ -172,7 +172,7 @@ def test_redacted_text_aborts_without_http_when_shared_redactor_fails(
 
     assert_preserved(out, messages, original)
     assert sent == []
-    assert value.last_stats["mode"] == "preserve"
+    assert value.last_stats["mode"] == "fallback", "no HTTP; local fact-rule fallback"
 
 
 def test_full_text_is_explicit_and_still_omits_tool_results(plugin: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:

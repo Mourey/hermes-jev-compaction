@@ -73,13 +73,13 @@ def test_deep_receipt_survives_result_drop(plugin, monkeypatch):
     assert "Status: sent delivered" in text, "tail confirmation lost"
 
 
-def test_no_receipt_still_truncates(plugin, monkeypatch):
+def test_no_receipt_still_reduced(plugin, monkeypatch):
     _drop_result_asker(plugin, monkeypatch)
     eng = _engine(plugin)
     out = eng.compress(_transcript(_NO_RECEIPT))
     text = out[3]["content"]
-    assert len(text) < len(_NO_RECEIPT), "without receipt markers the result should still be truncated"
-    assert "nothing special" not in text, "tail should not be kept when no receipt exists"
+    assert len(text) < len(_NO_RECEIPT), "without receipt markers the result should still be reduced"
+    assert "nothing special" in text, "an observation always keeps its tail"
 
 
 def test_dropped_call_recoverable_via_status(plugin, monkeypatch):
@@ -97,8 +97,9 @@ def test_dropped_call_recoverable_via_status(plugin, monkeypatch):
     msgs = _transcript("important result data")
     out = eng.compress(msgs)
 
-    # The tool row was stubbed
-    assert "dropped by jev-compaction" in out[3]["content"]
+    # A short observation survives even a drop_call verbatim; the call row stays too
+    assert out[3]["content"] == "important result data"
+    assert out[2]["tool_calls"][0]["id"] == "call-1"
     # But status exposes the full original for recovery
     status = eng.get_status()
     assert status["dropped_recent"], "no recovery record in status"

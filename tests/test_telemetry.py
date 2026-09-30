@@ -56,4 +56,4 @@ def test_transport_failure_event_sequence(plugin, monkeypatch):
     eng.compress(_transcript())
     status = eng.get_status()
     phases = [e["phase"] for e in status["session_events"]]
-    assert phases[-1] == "preserve", f"expected preserve, got {phases}"
+    assert phases[-1] == "fallback", f"expected fallback, got {phases}"
