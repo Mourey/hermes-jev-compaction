@@ -1,4 +1,4 @@
-# Fact rails (v0.5.0, refined in v0.6.0)
+# Fact rails (v0.5.0, refined in v0.6.0 and v0.7.0)
 
 Before v0.5.0 a call Jev scored as stale was stubbed: its arguments emptied, its result replaced by
 `dropped by jev-compaction`, or cut to a head. On real transcripts that lost most non-reproducible facts:
@@ -28,8 +28,21 @@ run the same rules and kept the same facts in every measurement.
   - observations of 6000 chars or less;
   - dense dumps up to 32k chars (20k before v0.6.0), where fact lines are at least half the text;
   - the first 2000 chars of an error.
-- **Rail tiers** (`RAIL_TIERS`, `RAIL_FLOOR = 0.2`): the strictest tier whose reduction clears the floor is
-  used (kept in the engine's `_rail_tier`).
+- **Rail tiers** (`RAIL_TIERS`): tier 1 is tier 0 without keeping reads; tiers 2–3 cut observations further.
+- **How much to free** (v0.7.0): enough to bring the prompt back to 5/6 of the trigger (`_min_reduction`); the part
+  of the prompt outside the messages (system prompt, tools) is subtracted, since it does not shrink. Without figures,
+  `RAIL_FLOOR = 0.2`.
+- **Result by result** (v0.7.0): the step to a stricter tier that frees the most chars per fact-like token lost
+  (numbers, hex ids, paths) goes first, until the reduction is reached. A result an earlier compaction reduced is
+  final. `_rail_tier` reports the strictest tier used.
+- **Oldest first, only under real pressure** (v0.7.0): when even the strictest tier leaves the prompt above
+  1.25× the trigger (at most 90% of the window's budget), the oldest dropped results keep only their fact lines,
+  then become one-line notes. Below that line Hermes simply compacts again on the next turn: there is no summary
+  cliff, and evicting for the target lost facts in the session model.
+- **Saved outputs** (v0.7.0): the full output of every reduced result is written to
+  `<hermes home>/jev-compaction/outputs/<session>/<tool_call_id>.txt`, and the note says where
+  (`the full output is saved at <path>; read it for anything not kept here`). A failed write leaves the note
+  pointing to `state.db`. `JEV_COMPACTION_SAVE_OUTPUTS=0` turns it off.
 - **Jev unreachable** (transport error, malformed answer, redactor failure): `mode = "fallback"`. Every old
   unpinned call is reduced by the same rules as a `drop_result`, with no HTTP and no summary. Before v0.5.0
   the engine returned the history unchanged (`mode = "preserve"`).
@@ -61,6 +74,24 @@ The method is the same as in the Claude fork's
   - facts deep in very long lines;
   - a 29k dense table.
 - No fact kept by v0.4.x was lost in any round.
+
+## Repeated compactions (v0.7.0)
+
+Session model (the Claude fork's `docs/data/sim_v2.mts`, ported as a Python harness): messages arrive one by one,
+the engine compacts at 60% of the window with Jev's recorded decisions, and the window is the transcript's size
+divided by the session's length in windows. Facts kept in the context:
+
+| session length | v0.6.0, blind 56 | v0.7.0, blind 56 | v0.6.0, in-sample 336 | v0.7.0, in-sample 336 |
+|---|---|---|---|---|
+| 0.8 window | 56 | 56 | 334 | 335 |
+| 1 window | 54 | 55 | 320 | 327 |
+| 1.2 windows | 54 | 52 | 307 | 307 |
+| 1.5 windows | 50 | 51 | 281 | 292 |
+
+- Counting the saved outputs too, v0.7.0 keeps 56/56 and 336/336 at every length.
+- At 1.5 windows v0.6.0 let the prompt grow to 79% of the window; v0.7.0 stays at or under 65%.
+- The blind facts are those of the fork's round 6; the eviction line (1.25× the trigger) was chosen on the same
+  simulation, so this table is not a fresh blind round.
 
 ## Price
 

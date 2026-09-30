@@ -7,6 +7,7 @@ observation. Run: python -B -m pytest tests/test_fact_rails.py -q
 import importlib.util
 import json
 import pathlib
+import re
 import sys
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "hermes-plugin"
@@ -109,7 +110,7 @@ def test_apply_shrinks_reads_keeps_observation_stubs_and_pairing():
         },
     ]
     out = engine.JevEngine._apply(
-        engine.JevEngine(), messages, calls, {"t1": "drop_call", "t2": "drop_call"}
+        engine.JevEngine(), messages, calls, {"t1": "drop_call", "t2": "drop_call"}, 0.5
     )
     assert (
         out[2]["content"].startswith("[jev-compaction omitted")
@@ -223,13 +224,13 @@ def test_rails_dense_table_failed_read_and_tiers():
         engine.fact_stub(table, False, "t", engine.RAIL_TIERS[0]) == table
     )  # dense dump kept whole
     assert (
-        engine.fact_stub(table, False, "t", engine.RAIL_TIERS[1]) != table
-    )  # a lower tier cuts it
+        engine.fact_stub(table, False, "t", engine.RAIL_TIERS[2]) != table
+    )  # a lower tier cuts it (tier 1 only gives up reads)
     failed = "find: '/c/nope': No such file or directory\nCommand did not complete within its 120s timeout"
     assert engine._READ_OBSERVATION.search(
         failed
     )  # a failed read is an observation, not a re-run line
-    assert engine.RAIL_FLOOR <= 0.25 and len(engine.RAIL_TIERS) == 3
+    assert engine.RAIL_FLOOR <= 0.25 and len(engine.RAIL_TIERS) == 4
 
 
 def test_metadata_reads_are_observations_even_in_compound_commands():
@@ -271,3 +272,104 @@ def test_dense_table_up_to_32k_kept_whole():
     table = "\n".join(rows)
     assert 20_000 < len(table) < 32_000
     assert engine.fact_stub(table, False, "t", engine.RAIL_TIERS[0]) == table
+
+
+def _observations(n: int, size: int = 9000):
+    messages = [{"role": "system", "content": "sys"}]
+    calls = []
+    for i in range(n):
+        tc_id = f"o{i}"
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": tc_id,
+                        "type": "function",
+                        "function": {"name": "terminal", "arguments": json.dumps({"command": f"curl -s http://127.0.0.1:{8000 + i}/health"})},
+                    }
+                ],
+            }
+        )
+        body = f"service {i} status=ok pid {40000 + i}\n" + "log line without facts\n" * (size // 23)
+        messages.append({"role": "tool", "tool_call_id": tc_id, "content": body})
+        calls.append({"id": f"t{i + 1}", "tool_call_id": tc_id, "tool": "terminal", "input": {"command": "curl"}, "pinned": False})
+    return messages, calls
+
+
+def test_greedy_gives_up_no_more_than_the_minimum_needs():
+    messages, calls = _observations(6)
+    drop = {c["id"]: "drop_result" for c in calls}
+    eng = engine.JevEngine()
+    eng._apply(messages, calls, drop, 0.05)
+    assert eng._rail_tier == 0  # tier 0 already frees 5%
+
+
+def test_last_resort_evicts_oldest_dropped_never_a_keep():
+    messages, calls = _observations(6)
+    decisions = {c["id"]: "drop_result" for c in calls}
+    decisions["t1"] = "keep"
+    eng = engine.JevEngine()
+    out = eng._apply(messages, calls, decisions, 0.97)
+    assert eng._rail_tier == engine.LAST_RESORT_TIER
+    by_id = {m.get("tool_call_id"): m for m in out if m.get("role") == "tool"}
+    assert by_id["o0"]["content"] == messages[2]["content"]  # Jev keep untouched
+    assert re.search(r"evicted under context pressure|only fact lines kept", by_id["o1"]["content"])
+
+
+def test_min_reduction_follows_the_prompt():
+    eng = engine.JevEngine()
+    messages, _ = _observations(3)
+    est = engine._message_tokens(messages)
+    assert eng._min_reduction(messages, None) == engine.RAIL_FLOOR  # no trigger known
+    eng.threshold_tokens = 1_000_000
+    eng.max_tokens = None
+    trigger = eng._effective_trigger()
+    expected = 1 - (trigger * 5 / 6 - 0) / est
+    got = eng._min_reduction(messages, est)
+    assert got == max(0.05, min(0.9, expected))
+
+
+def test_reduced_results_are_final():
+    stub = engine.fact_stub("x\n" * 5000, False, "t1")
+    assert engine.reduced_text(stub, False, "t1", engine.RAIL_TIERS[3], False) == stub
+
+
+def test_offload_saves_full_output_and_points_the_note(tmp_path, monkeypatch):
+    messages, calls = _observations(2)
+    eng = engine.JevEngine()
+    monkeypatch.setattr(eng, "_outputs_dir", lambda: tmp_path / "out")
+    out = eng._offload(messages, eng._apply(messages, calls, {c["id"]: "drop_result" for c in calls}, 0.5))
+    saved = tmp_path / "out" / "o0.txt"
+    assert saved.read_bytes().decode("utf-8") == messages[2]["content"]
+    note = next(m for m in out if m.get("tool_call_id") == "o0")["content"]
+    assert f"the full output is saved at {saved.as_posix()}" in note
+    assert engine.full_output_note("o0") not in note
+
+
+def test_offload_failure_keeps_the_history_note(tmp_path, monkeypatch):
+    messages, calls = _observations(2)
+    eng = engine.JevEngine()
+    monkeypatch.setattr(eng, "_outputs_dir", lambda: tmp_path / "out")
+
+    def refuse(self, data):
+        raise OSError("EACCES")
+
+    monkeypatch.setattr(engine.Path, "write_bytes", refuse)
+    reduced = eng._apply(messages, calls, {c["id"]: "drop_result" for c in calls}, 0.5)
+    assert eng._offload(messages, reduced) == reduced
+
+
+def test_hard_line_sits_above_the_trigger_and_inside_the_budget():
+    eng = engine.JevEngine()
+    messages, _ = _observations(3)
+    est = engine._message_tokens(messages)
+    assert eng._hard_reduction(messages, None) == 0.0  # no figures: never forced
+    eng.threshold_tokens = 1_000_000
+    trigger = eng._effective_trigger()
+    tokens = int(trigger * 1.1)
+    # 10% over the trigger is under the 1.25x line: nothing is forced
+    assert eng._hard_reduction(messages, tokens) <= max(0.0, 1 - (trigger * 1.25 - (tokens - est)) / est) + 1e-9
+    # the min reduction still asks for the way back to 5/6 of the trigger
+    assert eng._min_reduction(messages, tokens) >= eng._hard_reduction(messages, tokens)

@@ -73,8 +73,9 @@ def test_all_keep_returns_same_objects():
     assert eng.last_stats["mode"] == "jev" and eng.last_stats["kept"] >= 1
 
 
-def test_drop_call_stubs_pair_preserved():
+def test_drop_call_stubs_pair_preserved(monkeypatch):
     """Index-safe + pairing-safe: a dropped call is never erased; its reproducible read shrinks to a note."""
+    monkeypatch.setattr(jev, "RAIL_FLOOR", 0.95)  # demand every reduction the rails can give
     eng = make_engine()
     msgs = transcript(n_calls=2)
     patch_ask(eng, FakeAnswers(lambda c: "drop_call"))
@@ -89,7 +90,8 @@ def test_drop_call_stubs_pair_preserved():
     assert len(out) == len(msgs)
 
 
-def test_drop_result_truncates_but_keeps_row():
+def test_drop_result_truncates_but_keeps_row(monkeypatch):
+    monkeypatch.setattr(jev, "RAIL_FLOOR", 0.95)
     eng = make_engine()
     msgs = transcript(n_calls=2)
     patch_ask(eng, FakeAnswers(lambda c: "drop_result"))
@@ -99,7 +101,8 @@ def test_drop_result_truncates_but_keeps_row():
     assert all("jev-compaction omitted" in m["content"] for m in tool_rows)
 
 
-def test_mixed_decisions_partition():
+def test_mixed_decisions_partition(monkeypatch):
+    monkeypatch.setattr(jev, "RAIL_FLOOR", 0.95)
     eng = make_engine()
     msgs = transcript(n_calls=3)
     patch_ask(eng, FakeAnswers(lambda c: {"t1": "keep", "t2": "drop_result", "t3": "drop_call"}[c["id"]]))
@@ -384,9 +387,10 @@ def test_threshold_tokens_cap_bounds_trigger():
 
 # ---------- P0-3/P0-4/P0-5 regression (v0.3.2) ----------
 
-def test_jev_failure_falls_back_without_erasing():
+def test_jev_failure_falls_back_without_erasing(monkeypatch):
     """Jev failure: the deterministic fallback reduces results by the fact rules; nothing is erased,
     nothing is summarized, and the caller's list is not mutated."""
+    monkeypatch.setattr(jev, "RAIL_FLOOR", 0.95)
     eng = make_engine()
     msgs = transcript(n_calls=3)
     original = copy.deepcopy(msgs)

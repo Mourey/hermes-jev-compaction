@@ -21,10 +21,12 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import re
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import Any
 
 from .egress import metadata_input, redact_export_value
@@ -307,16 +309,38 @@ RAIL_TIERS = (
         "dense_keep": 32000,
         "dense_share": 0.5,
     },
+    # v0.7.0 (fork astra.10): reads give way first (tier 1 = tier 0 without keeping reads), then observations
+    {
+        "small": 6000,
+        "share": 0.3,
+        "read_keep": 0,
+        "dense_keep": 32000,
+        "dense_share": 0.5,
+    },
     {
         "small": 3000,
         "share": 0.2,
-        "read_keep": 1500,
+        "read_keep": 0,
         "dense_keep": 0,
         "dense_share": 1.0,
     },
     {"small": 0, "share": 0.1, "read_keep": 0, "dense_keep": 0, "dense_share": 1.0},
 )
-RAIL_FLOOR = 0.2  # no summary cliff in Hermes: a compaction that frees 20% is still worth it (the fork keeps 0.3 above its hook's 25% fallback)
+RAIL_FLOOR = 0.2  # default when the context's fill is unknown; otherwise _min_reduction() decides (no summary cliff in Hermes)
+LAST_RESORT_TIER = len(RAIL_TIERS)  # reported when the oldest results had to give way
+_COMPACTED_MARK = re.compile(r"\[jev-compaction (?:omitted|truncated) ")
+# Fact-like tokens a result loses by going to a stricter tier: paths, hex ids, numbers (the greedy's risk).
+_FACT_TOKEN = re.compile(
+    r"[A-Za-z]:[\\/][^\s\"'<>]+|/(?:[\w.@-]+/)+[\w.@-]+|\b[0-9a-f]{7,40}\b|\b\d[\d.,:]*\d\b",
+    re.IGNORECASE,
+)
+
+
+def full_output_note(tool_call_id: str) -> str:
+    """The phrase a reduced result's note carries; the engine swaps it for a saved file's path (_offload)."""
+    return f"the full output stays in this session's history (state.db) under {tool_call_id}"
+
+
 _READ_OBSERVATION = re.compile(
     r"\b(?:errno|os error|timed? ?out|timeout|permission denied|access is denied|no such file|cannot find|not found"
     r"|running in background|background with id|exit code [1-9]|killed)\b",
@@ -352,7 +376,7 @@ def fact_stub(
         max(FACT_BUDGET_CHARS, int(len(text) * rails["share"])),
     )
     where = (
-        f"the full output stays in this session's history (state.db) under {tool_call_id}"
+        full_output_note(tool_call_id)
         if tool_call_id
         else "the full output stays in this session's history (state.db)"
     )
@@ -368,13 +392,55 @@ def fact_stub(
     )
 
 
-def rerun_note(text: str) -> str:
+def rerun_note(text: str, tool_call_id: str | None = None) -> str:
+    # The note also names where the full output is: a file can change after the read, and the engine saves it.
+    where = f"; {full_output_note(tool_call_id)}" if tool_call_id else ""
     return (
         text
         if len(text) <= 160
         else (
-            f"[jev-compaction omitted {len(text)} chars: a reproducible read, re-run the tool to see it]"
+            f"[jev-compaction omitted {len(text)} chars: a reproducible read, re-run the tool to see it{where}]"
         )
+    )
+
+
+def reduced_text(
+    text: str, is_error: bool, tool_call_id: str, rails: dict, rerunnable: bool
+) -> str:
+    """One result under one rail tier. Idempotent: a result an earlier compaction reduced is final."""
+    if _COMPACTED_MARK.search(text):
+        return text
+    if (
+        rerunnable
+        and not is_error
+        and len(text) > rails["read_keep"]
+        and not _READ_OBSERVATION.search(text)
+    ):
+        return rerun_note(text, tool_call_id)
+    return fact_stub(text, is_error, tool_call_id, rails)
+
+
+def _chars(messages: list[dict[str, Any]]) -> int:
+    """Chars as the fork counts them: content plus tool-call arguments once, as sent (json.dumps of the tool_calls
+    list would count the JSON string escaped twice)."""
+    return sum(
+        len(_content_text(m.get("content")))
+        + sum(
+            len(str((tc.get("function") or {}).get("arguments") or ""))
+            for tc in m.get("tool_calls") or []
+        )
+        for m in messages
+    )
+
+
+def _message_tokens(messages: list[dict[str, Any]]) -> int:
+    return sum(
+        estimate_tokens(_content_text(m.get("content")))
+        + sum(
+            estimate_tokens(str((tc.get("function") or {}).get("arguments") or ""))
+            for tc in m.get("tool_calls") or []
+        )
+        for m in messages
     )
 
 
@@ -496,6 +562,9 @@ class JevEngine(EngineSettings):
         stats.update({"calls": len(calls), "candidates": len(candidates)})
         if not candidates:
             return messages
+        floor = self._min_reduction(messages, current_tokens)
+        hard = self._hard_reduction(messages, current_tokens)
+        stats["min_reduction"] = round(floor, 3)
         try:
             state, state_tokens = self._fit_state(messages, calls)
             answers = self._ask_all(state, state_tokens, candidates)
@@ -504,8 +573,8 @@ class JevEngine(EngineSettings):
             stats["error"] = "egress or Jev failure"
             self._events.append({"phase": "fallback", "reason": "transport_error"})
             self._last_failure_monotonic = time.monotonic()
-            return self._fallback_prune(
-                messages, calls
+            return self._offload(
+                messages, self._fallback_prune(messages, calls, floor, hard)
             )  # user decision 2026-09-30: wire it, not fail open
         by_id = {}
         for c, a in zip(candidates, answers, strict=False):
@@ -516,7 +585,7 @@ class JevEngine(EngineSettings):
             if d == "drop_call" and c.get("is_error"):
                 d = "drop_result"
             by_id[c["id"]] = d
-        out = self._apply(messages, calls, by_id)
+        out = self._offload(messages, self._apply(messages, calls, by_id, floor, hard))
         dropped_calls = [c for c in calls if by_id.get(c["id"]) == "drop_call"]
         self._dropped_receipts = getattr(self, "_dropped_receipts", [])[-100:]
         for c in dropped_calls:
@@ -852,30 +921,136 @@ class JevEngine(EngineSettings):
         messages: list[dict[str, Any]],
         calls: list[dict[str, Any]],
         decisions: dict[str, str],
+        min_reduction: float | None = None,
+        hard_reduction: float | None = None,
     ) -> list[dict[str, Any]]:
-        """The strictest rail tier whose char reduction clears RAIL_FLOOR (the last tier when none does)."""
+        """Decisions applied with as few rails given up as `min_reduction` (default RAIL_FLOOR) needs (fork astra.10).
 
-        # chars as the fork counts them: content plus tool-call arguments (a stubbed call's brief input counts)
-        def chars(ms: list[dict[str, Any]]) -> int:
-            # arguments once, as sent: json.dumps of the tool_calls list would count the JSON string escaped twice
-            return sum(
-                len(_content_text(m.get("content")))
-                + sum(
-                    len(str((tc.get("function") or {}).get("arguments") or ""))
-                    for tc in m.get("tool_calls") or []
-                )
-                for m in ms
+        Result by result, the step to a stricter tier that frees the most chars per fact-like token lost goes first.
+        Only when even the strictest tier misses `hard_reduction` do the oldest dropped results give way
+        (_last_resort). Hermes has no summary cliff: missing the target just means another compaction next turn, so
+        the hard line is above the trigger (_hard_reduction), not the target; evicting for the target lost facts.
+        """
+        floor = RAIL_FLOOR if min_reduction is None else min_reduction
+        hard = floor if hard_reduction is None else hard_reduction
+        before = _chars(messages)
+        rerunnable = {
+            c["tool_call_id"] for c in calls if reproducible(c["tool"], c["input"])
+        }
+        dropped = {
+            c["tool_call_id"] for c in calls if decisions.get(c["id"], "keep") != "keep"
+        }
+        texts = {
+            m["tool_call_id"]: (
+                _content_text(m.get("content")),
+                bool(m.get("is_error")),
             )
+            for m in messages
+            if m.get("role") == "tool" and m.get("tool_call_id") in dropped
+        }
+        reduced_cache: dict[tuple[str, int], str] = {}
 
-        before = chars(messages)
-        out: list[dict[str, Any]] = []
-        for tier, rails in enumerate(RAIL_TIERS):
-            out = self._apply_tier(messages, calls, decisions, rails)
-            after = chars(out)
-            self._rail_tier = tier
-            if before == 0 or (before - after) / before >= RAIL_FLOOR:
+        def reduced(tc_id: str, tier: int) -> str:
+            if (tc_id, tier) not in reduced_cache:
+                text, is_error = texts[tc_id]
+                reduced_cache[tc_id, tier] = reduced_text(
+                    text, is_error, tc_id, RAIL_TIERS[tier], tc_id in rerunnable
+                )
+            return reduced_cache[tc_id, tier]
+
+        level: dict[str, int] = {}
+        need = before * (1 - floor)
+        after = _chars(
+            self._apply_tier(
+                messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)]
+            )
+        )
+        top = 0
+        while after > need and before > 0:
+            best: tuple[str, int, int, float] | None = None
+            for tc_id in texts:
+                cur = level.get(tc_id, 0)
+                for tier in range(cur + 1, len(RAIL_TIERS)):
+                    gain = len(reduced(tc_id, cur)) - len(reduced(tc_id, tier))
+                    if gain <= 0:
+                        continue  # a tier that does not touch this result: look further
+                    lost = len(
+                        set(_FACT_TOKEN.findall(reduced(tc_id, cur)))
+                        - set(_FACT_TOKEN.findall(reduced(tc_id, tier)))
+                    )
+                    score = gain / (1 + lost)
+                    if best is None or score > best[3]:
+                        best = (tc_id, tier, gain, score)
+                    break
+            if best is None:
                 break
+            level[best[0]] = best[1]
+            top = max(top, best[1])
+            after -= best[2]
+        out = self._apply_tier(
+            messages, calls, decisions, lambda i: RAIL_TIERS[level.get(i, 0)]
+        )
+        self._rail_tier = top
+        hard_need = before * (1 - hard)
+        if before and hard > 0 and _chars(out) > hard_need:
+            evicted = self._last_resort(out, calls, decisions, hard_need)
+            if evicted is not out:
+                self._rail_tier = LAST_RESORT_TIER
+                out = evicted
         return out
+
+    def _last_resort(
+        self,
+        out: list[dict[str, Any]],
+        calls: list[dict[str, Any]],
+        decisions: dict[str, str],
+        need: float,
+    ) -> list[dict[str, Any]]:
+        """The oldest dropped results give way when even the strictest tier is too big: first only their fact lines
+        stay, then they become one-line notes. Pinned calls and Jev keeps are never touched."""
+        order = [
+            c["tool_call_id"]
+            for c in calls
+            if not c.get("pinned") and decisions.get(c["id"], "keep") != "keep"
+        ]
+        where = {
+            m.get("tool_call_id"): k
+            for k, m in enumerate(out)
+            if m.get("role") == "tool"
+        }
+        res = list(out)
+        total = _chars(res)
+        changed = False
+
+        def put(tc_id: str, text: str) -> None:
+            nonlocal total, changed
+            k = where[tc_id]
+            total -= len(_content_text(res[k].get("content"))) - len(text)
+            res[k] = dict(res[k], content=text)
+            changed = True
+
+        for tc_id in order:
+            if total <= need:
+                break
+            if tc_id not in where:
+                continue
+            text = _content_text(res[where[tc_id]].get("content"))
+            notes = [ln for ln in text.split("\n") if _COMPACTED_MARK.search(ln)] or [
+                f"[jev-compaction omitted {len(text)} chars: only fact lines kept under context pressure; {full_output_note(tc_id)}]"
+            ]
+            nxt = "\n".join(fact_lines(text, len(text) // 4) + notes)
+            if len(nxt) < len(text):
+                put(tc_id, nxt)
+        for tc_id in order:
+            if total <= need:
+                break
+            if tc_id not in where:
+                continue
+            text = _content_text(res[where[tc_id]].get("content"))
+            nxt = f"[jev-compaction omitted {len(text)} chars: evicted under context pressure, oldest first; {full_output_note(tc_id)}]"
+            if len(nxt) < len(text):
+                put(tc_id, nxt)
+        return res if changed else out
 
     def _apply_tier(
         self,
@@ -888,6 +1063,8 @@ class JevEngine(EngineSettings):
         # shrinks to its call plus one line; any other call (network, processes, logs, tests, side effects,
         # MCP) keeps a fact stub: head, fact lines (errors, paths, versions, ids, endpoints, codes), tail.
         # Errors keep 2000 chars (the failure-history guard in compress() already keeps their call).
+        # `rails` is one tier for every result, or a function of the tool_call_id (the greedy in _apply).
+        rails_for = rails if callable(rails) else (lambda _tc_id: rails)
         action_by_tool_call_id = {
             c["tool_call_id"]: decisions.get(c["id"], "keep") for c in calls
         }
@@ -902,13 +1079,8 @@ class JevEngine(EngineSettings):
                 if action_by_tool_call_id.get(tc_id, "keep") != "keep":
                     text = _content_text(msg.get("content"))
                     is_error = bool(msg.get("is_error"))
-                    reduced = (
-                        rerun_note(text)
-                        if tc_id in rerunnable
-                        and not is_error
-                        and len(text) > rails["read_keep"]
-                        and not _READ_OBSERVATION.search(text)
-                        else fact_stub(text, is_error, tc_id, rails)
+                    reduced = reduced_text(
+                        text, is_error, tc_id, rails_for(tc_id), tc_id in rerunnable
                     )
                     if reduced != text:
                         msg = dict(msg, content=reduced)
@@ -950,8 +1122,91 @@ class JevEngine(EngineSettings):
             out.append(msg)
         return out
 
+    def _min_reduction(
+        self, messages: list[dict[str, Any]], current_tokens: int | None
+    ) -> float:
+        """What this compaction must free (fork astra.10's pressure): enough to bring the prompt back to 5/6 of the
+        trigger. The part of the prompt outside the messages (system prompt, tools) does not shrink: it is the prompt's
+        token count minus the messages' own estimate. Without figures, RAIL_FLOOR."""
+        trigger = self._effective_trigger() if self.threshold_tokens else 0
+        tokens = current_tokens or self.last_prompt_tokens
+        est = _message_tokens(messages)
+        if not trigger or not tokens or est <= 0:
+            return RAIL_FLOOR
+        overhead = max(0, tokens - est)
+        return min(0.9, max(0.05, 1 - (trigger * 5 / 6 - overhead) / est))
+
+    def _hard_reduction(
+        self, messages: list[dict[str, Any]], current_tokens: int | None
+    ) -> float:
+        """What the prompt must lose to get under the hard line, 1.25x the trigger but at most 90% of the window's
+        budget: below it the oldest results never give way (Hermes compacts again next turn instead). In the session
+        model a line at the trigger itself lost facts against v0.6.0 (blind, 1.5 windows: 44 vs 50 of 56); at 1.25x it
+        keeps 51. 0 when there is nothing to force or no figures."""
+        trigger = self._effective_trigger() if self.threshold_tokens else 0
+        tokens = current_tokens or self.last_prompt_tokens
+        est = _message_tokens(messages)
+        if not trigger or not tokens or est <= 0:
+            return 0.0
+        if self.max_tokens and self.context_length > self.max_tokens:
+            budget = self.context_length - self.max_tokens
+        else:
+            budget = int((self.context_length or 0) * (1.0 - self._RESERVED_FRACTION))
+        line = min(trigger * 1.25, 0.9 * budget) if budget else trigger * 1.25
+        overhead = max(0, tokens - est)
+        return min(0.9, max(0.0, 1 - (line - overhead) / est))
+
+    # Save the full output of every reduced result (fork astra.11): what a stub does not keep stays one read away.
+    save_full_outputs = os.environ.get("JEV_COMPACTION_SAVE_OUTPUTS", "1") != "0"
+
+    def _outputs_dir(self) -> Path:
+        try:
+            from hermes_constants import get_hermes_home
+
+            home = Path(get_hermes_home())
+        except Exception:  # noqa: BLE001 — outside Hermes (tests, offline runs)
+            home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+        session = re.sub(r"[^\w.-]", "_", self._snapshot_session_id or "session")
+        return home / "jev-compaction" / "outputs" / session
+
+    def _offload(
+        self, original: list[dict[str, Any]], out: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Writes the full output of every result the compaction reduced to <hermes home>/jev-compaction/outputs/
+        <session>/<tool_call_id>.txt and points its note there; a write that fails leaves the note as it was."""
+        if not self.save_full_outputs:
+            return out
+        full = {
+            m.get("tool_call_id"): _content_text(m.get("content"))
+            for m in original
+            if m.get("role") == "tool"
+        }
+        base: Path | None = None
+        res = []
+        for m in out:
+            tc_id = m.get("tool_call_id") if m.get("role") == "tool" else None
+            text = _content_text(m.get("content")) if tc_id else ""
+            note = full_output_note(tc_id) if tc_id else ""
+            if not tc_id or note not in text or tc_id not in full:
+                res.append(m)
+                continue
+            try:
+                base = base or self._outputs_dir()
+                path = base / f"{re.sub(r'[^\w.-]', '_', tc_id)}.txt"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(full[tc_id].encode("utf-8"))
+                saved = f"the full output is saved at {path.as_posix()}; read it for anything not kept here"
+                res.append(dict(m, content=text.replace(note, saved)))
+            except OSError:
+                res.append(m)
+        return res
+
     def _fallback_prune(
-        self, messages: list[dict[str, Any]], calls: list[dict[str, Any]] | None = None
+        self,
+        messages: list[dict[str, Any]],
+        calls: list[dict[str, Any]] | None = None,
+        min_reduction: float | None = None,
+        hard_reduction: float | None = None,
     ) -> list[dict[str, Any]]:
         """Deterministic degrade when Jev is unreachable: every old unpinned call is reduced by the same
         rules as a Jev "drop_result" — a reproducible read shrinks to a line, anything else keeps a
@@ -959,7 +1214,11 @@ class JevEngine(EngineSettings):
         Nothing is erased and no summary is written, so no fact is paraphrased away."""
         calls = self._collect_calls(messages) if calls is None else calls
         return self._apply(
-            messages, calls, {c["id"]: "drop_result" for c in calls if not c["pinned"]}
+            messages,
+            calls,
+            {c["id"]: "drop_result" for c in calls if not c["pinned"]},
+            min_reduction,
+            hard_reduction,
         )
 
 
