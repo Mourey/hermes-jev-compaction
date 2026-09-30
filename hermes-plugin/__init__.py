@@ -208,6 +208,23 @@ _MUTABLE_SOURCE = re.compile(
 )
 
 
+# File metadata is a measurement taken at one moment: line counts, sizes and modification times change with every
+# edit, and the agent quotes them as evidence. A read that reports metadata (wc, stat, du, df, a long listing) is an
+# observation, alone or inside a compound command (held-out round 4: `wc -l f && sed -n 1,140p f` and
+# `cat card; ls -la dir` were shrunk to re-run lines). Same as the fork.
+_METADATA_VERBS = {
+    "wc",
+    "stat",
+    "du",
+    "df",
+    "dir",
+    "get-childitem",
+    "gci",
+    "measure-object",
+}
+_LONG_LISTING = re.compile(r"^ls\s+(?:\S+\s+)*-[a-zA-Z]*l")
+
+
 def reproducible(tool: str, args: Any) -> bool:
     """True when re-running the call gives its output back: a read of files, not of the world."""
     if _MUTABLE_SOURCE.search(
@@ -229,16 +246,40 @@ def reproducible(tool: str, args: Any) -> bool:
             continue
         if re.match(r"^sed\s+(-\w*i|--in-place)", words):
             return False
-        if words.split()[0].strip("\"'").lower() not in _READ_VERBS:
+        verb = words.split()[0].strip("\"'").lower()
+        if verb in _METADATA_VERBS or _LONG_LISTING.match(words):
+            return False  # metadata is an observation
+        if verb not in _READ_VERBS:
             return False
     return True
+
+
+def _pieces(line: str) -> list[str]:
+    """A line longer than FACT_LINE_CHARS (JSON with escaped newlines, a minified record, a wide row) is split into
+    pieces rather than truncated, so a fact deep in a long line is still a candidate. Same as the fork."""
+    out = []
+    for rest in line.split("\\n"):
+        rest = rest.strip()
+        while len(rest) > FACT_LINE_CHARS:
+            window = rest[:FACT_LINE_CHARS]
+            cut = max(
+                window.rfind(", "),
+                window.rfind("; "),
+                window.rfind(" | "),
+                window.rfind(" "),
+            )
+            end = cut + 1 if cut > FACT_LINE_CHARS / 2 else FACT_LINE_CHARS
+            out.append(rest[:end].strip())
+            rest = rest[end:].strip()
+        if rest:
+            out.append(rest)
+    return out
 
 
 def fact_lines(text: str, budget: int) -> list[str]:
     """Lines of text carrying facts, most fact-dense first until budget chars, returned in text order."""
     scored = []
-    for index, raw in enumerate(text.splitlines()):
-        line = raw.strip()[:FACT_LINE_CHARS]
+    for index, line in enumerate(p for raw in text.splitlines() for p in _pieces(raw)):
         score = sum(1 for p in _FACT_PATTERNS if line and p.search(line))
         if score:
             scored.append((-score, index, line))
@@ -263,7 +304,7 @@ RAIL_TIERS = (
         "small": 6000,
         "share": 0.3,
         "read_keep": 3000,
-        "dense_keep": 20000,
+        "dense_keep": 32000,
         "dense_share": 0.5,
     },
     {

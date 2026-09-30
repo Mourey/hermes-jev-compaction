@@ -23,8 +23,8 @@ spec.loader.exec_module(engine)
 def test_reproducible_reads_versus_observations_and_side_effects():
     assert engine.reproducible("read_file", {"path": "a.py"})
     assert engine.reproducible(
-        "terminal", {"command": "ls -la F:/Temp 2>&1 | head -40; find F:/Temp -type d"}
-    )
+        "terminal", {"command": "ls F:/Temp 2>&1 | head -40; find F:/Temp -type d"}
+    )  # a long listing (ls -la) reports metadata: see the metadata test below
     assert engine.reproducible("terminal", {"command": "git log --oneline | head -5"})
     for tool, args in [
         ("terminal", {"command": "curl -s https://x.org"}),
@@ -216,9 +216,58 @@ def test_logs_are_observations_not_reproducible_reads():
 
 
 def test_rails_dense_table_failed_read_and_tiers():
-    table = "\n".join(f"F:/Projects/p{i} {3000 + i} {19602045188 + i}" for i in range(300))
-    assert engine.fact_stub(table, False, "t", engine.RAIL_TIERS[0]) == table  # dense dump kept whole
-    assert engine.fact_stub(table, False, "t", engine.RAIL_TIERS[1]) != table  # a lower tier cuts it
+    table = "\n".join(
+        f"F:/Projects/p{i} {3000 + i} {19602045188 + i}" for i in range(300)
+    )
+    assert (
+        engine.fact_stub(table, False, "t", engine.RAIL_TIERS[0]) == table
+    )  # dense dump kept whole
+    assert (
+        engine.fact_stub(table, False, "t", engine.RAIL_TIERS[1]) != table
+    )  # a lower tier cuts it
     failed = "find: '/c/nope': No such file or directory\nCommand did not complete within its 120s timeout"
-    assert engine._READ_OBSERVATION.search(failed)  # a failed read is an observation, not a re-run line
+    assert engine._READ_OBSERVATION.search(
+        failed
+    )  # a failed read is an observation, not a re-run line
     assert engine.RAIL_FLOOR <= 0.25 and len(engine.RAIL_TIERS) == 3
+
+
+def test_metadata_reads_are_observations_even_in_compound_commands():
+    for command in (
+        "cd /x && wc -l pin.mjs && sed -n 1,140p pin.mjs",
+        "cat card.xtml; echo; ls -la /x /x/reports 2>&1",
+        "stat a.txt",
+        "du -sh /x",
+    ):
+        assert not engine.reproducible("terminal", {"command": command}), command
+    assert not engine.reproducible(
+        "PowerShell", {"command": "Get-ChildItem C:/x | Select-Object -First 5"}
+    )
+    assert engine.reproducible("terminal", {"command": "cat a.txt | head -40"})
+
+
+def test_long_line_is_split_into_pieces_not_truncated():
+    sep = "\\n"  # an escaped newline inside a JSON string: the line has no real line break
+    filler = sep.join('\\"content\\": \\"note ' + "y" * 120 + '\\"' for _ in range(60))
+    line = (
+        '{"text": "'
+        + filler
+        + sep
+        + '  \\"id\\": \\"f46101ab4a1ecfd2\\"'
+        + sep
+        + filler
+        + '"}'
+    )
+    assert "\n" not in line and len(line) > 10_000
+    assert any("f46101ab4a1ecfd2" in piece for piece in engine.fact_lines(line, 3000))
+
+
+def test_dense_table_up_to_32k_kept_whole():
+    rows = (
+        f"b{i} server-{i}.exe.bak-b{i}-20260930 | wave W{i} | "
+        f"['drafts:events.json', 'live:agent-{i}.jsonl'] | " + "z" * 60
+        for i in range(150)
+    )
+    table = "\n".join(rows)
+    assert 20_000 < len(table) < 32_000
+    assert engine.fact_stub(table, False, "t", engine.RAIL_TIERS[0]) == table
