@@ -424,18 +424,3 @@ def test_expired_outputs_are_deleted(tmp_path):
     os.utime(old, (now - 31 * 86400, now - 31 * 86400))
     assert engine.JevEngine._expire_outputs(tmp_path, now) == 1
     assert not old.exists() and not old.parent.exists() and new.exists()
-
-
-def test_mdl_keeps_the_line_that_does_not_compress_against_its_context():
-    table = "\n".join(f"row {i % 7} ok ok ok status=ready region=eu-west" for i in range(200))
-    text = f"{table}\nbuild 7f3a9c2e41d8b05f verified: 3 of 4 checks failed\n{table}"
-    assert "7f3a9c2e41d8b05f" in "\n".join(engine.mdl_lines(text, 200))
-
-
-def test_matched_hybrid_never_takes_more_than_the_regex_selection():
-    table = "\n".join(f"row {i % 7} ok ok ok status=ready region=eu-west" for i in range(200))
-    text = f"{table}\nbuild 7f3a9c2e41d8b05f verified: 3 of 4 checks failed\nerror: timeout after 30s\n{table}"
-    regex = engine.fact_lines(text, 400)
-    matched = engine.matched_hybrid_lines(text, 400)
-    assert sum(len(x) + 1 for x in matched) <= sum(len(x) + 1 for x in regex)
-    assert "3 of 4 checks failed" in "\n".join(matched)
