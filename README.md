@@ -22,13 +22,13 @@ omitted, nothing rewritten) and answers two yes/no questions per tool call —
 should the call stay, and should its result stay verbatim. Text is never
 rewritten; only tool calls and results are deleted or truncated.
 
-## Fact rails (v0.5.0)
+## Fact rails (v0.5.0, refined in v0.6.0)
 
 Nothing Jev drops is erased any more. A reproducible read longer than 3000 chars shrinks to a one-line note;
 any other result keeps its head, its fact lines (errors, HTTP codes, paths, versions, ids, counts, receipts)
 and its tail, and results up to 6000 chars stay whole. When Jev is unreachable, the same rules run locally
-(`mode = "fallback"`) instead of leaving the history untouched. On a blind held-out round the engine kept
-70/75 preregistered facts (v0.4.x: 13/75) at a 58% token reduction (v0.4.x: 92%). Rules and evidence:
+(`mode = "fallback"`) instead of leaving the history untouched. On the latest blind held-out round (v0.6.0)
+the engine kept 50/50 preregistered facts (v0.4.x: 4/50) at a 45% token reduction (v0.4.x: 88%). Rules and evidence:
 [docs/fact-rails.md](docs/fact-rails.md). The same rules run in Claude Code:
 [deadczarvc-labs/jev-factkeep-compaction](https://github.com/deadczarvc-labs/jev-factkeep-compaction).
 
@@ -38,7 +38,7 @@ and its tail, and results up to 6000 chars stay whole. When Jev is unreachable, 
 |---|---|
 | `src/hermes.ts` | Bidirectional adapter: OpenAI-chat messages (`role/content/tool_calls` + `role:"tool"`) ↔ library `Message[]`. Handles nested and flat tool-call spellings, content-part arrays, grouped tool results. |
 | `bin/hermes-compact.mjs` | On-demand CLI: reads a transcript (JSON array / `{"messages":[...]}` / JSONL), runs Jev, writes the compacted transcript + stats. `--dry-run` maps without any API call. |
-| `tests/` | TypeScript adapter tests + Python engine tests. Green: 32/32 vitest, 80/80 pytest. |
+| `tests/` | TypeScript adapter tests + Python engine tests. Green: 32/32 vitest, 83/83 pytest. |
 | `HERMES.md` | Integration details for Hermes users and agent-operated workflows. |
 
 
@@ -78,16 +78,16 @@ const compacted = toHermes(result.messages);
 ```bash
 npx vitest run            # 32/32 (library + adapter)
 # Python engine tests need the Hermes core on PYTHONPATH (plugin imports agent.context_engine):
-PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 80/80
+PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 83/83
 ```
 
 ## Hermes integration status
 
-Today: on-demand — the agent or a session script runs the CLI over a
-transcript when context pressure grows. In progress: a proper integration as a
-Hermes **context engine plugin** (Hermes exposes a `ContextEngine`
-extension point, `context.engine` in config.yaml), so compaction runs
-in-session without core patches. See `HERMES.md` for the running notes.
+In-session: `hermes-plugin/` is a Hermes **context engine plugin** (the
+`ContextEngine` extension point). Copy it to `~/.hermes/plugins/jev-context-engine/`
+and set `context.engine: jev` in config.yaml; compaction then runs inside the
+session without core patches. The CLI above stays for on-demand use. See
+`HERMES.md` for the running notes.
 
 ## Threshold calibration
 

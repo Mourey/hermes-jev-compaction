@@ -2,7 +2,7 @@
 
 本仓库是 [tamaratran/fast-jev-compaction](https://github.com/tamaratran/fast-jev-compaction) 面向 Hermes 的专用 fork。语言：[English](README.md) · [Русский](HERMES.ru.md) · **中文**
 
-**v0.5.0 — 事实护栏。** Jev 丢弃的调用不再被抹掉：超过 3000 字符的可复现读取折叠为一行说明，其余结果保留开头、事实行（错误、HTTP 状态码、路径、版本、id、计数、回执）与结尾，6000 字符以内的结果完整保留。Jev 不可用时同样的规则在本地执行（`fallback`）。在盲测 held-out 轮次中保留 70/75 个事实（v0.4.x：13/75）。详见 [docs/fact-rails.md](docs/fact-rails.md)。
+**v0.5.0 — 事实护栏。** Jev 丢弃的调用不再被抹掉：超过 3000 字符的可复现读取折叠为一行说明，其余结果保留开头、事实行（错误、HTTP 状态码、路径、版本、id、计数、回执）与结尾，6000 字符以内的结果完整保留。Jev 不可用时同样的规则在本地执行（`fallback`）。在最新一轮盲测 held-out（v0.6.0）中保留 50/50 个事实（v0.4.x：4/50）。详见 [docs/fact-rails.md](docs/fact-rails.md)。
 
 本 fork 为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 添加了
 fast-jev-compaction 库的适配层：将 OpenAI-chat 格式的会话记录映射为库内部的
