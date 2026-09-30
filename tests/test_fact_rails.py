@@ -6,9 +6,11 @@ observation. Run: python -B -m pytest tests/test_fact_rails.py -q
 
 import importlib.util
 import json
+import os
 import pathlib
 import re
 import sys
+import time
 
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "hermes-plugin"
 spec = importlib.util.spec_from_file_location(
@@ -373,3 +375,52 @@ def test_hard_line_sits_above_the_trigger_and_inside_the_budget():
     assert eng._hard_reduction(messages, tokens) <= max(0.0, 1 - (trigger * 1.25 - (tokens - est)) / est) + 1e-9
     # the min reduction still asks for the way back to 5/6 of the trigger
     assert eng._min_reduction(messages, tokens) >= eng._hard_reduction(messages, tokens)
+
+
+def _one_output(tc_id: str, text: str):
+    messages = [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": tc_id, "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": tc_id, "content": text},
+    ]
+    reduced = [messages[0], dict(messages[1], content=f"[jev-compaction omitted; {engine.full_output_note(tc_id)}]")]
+    return messages, reduced
+
+
+def test_saved_copy_is_redacted(tmp_path, monkeypatch):
+    key = "sk-" + "proj" + "-" + "aB3dE6gH9jK2mN5pQ8sT" * 2  # built at run time: no key-shaped literal in the repo
+    messages, reduced = _one_output("o1", f"OPENAI_API_KEY={key}\n" + "line\n" * 2000)
+    eng = engine.JevEngine()
+    monkeypatch.setattr(eng, "_outputs_dir", lambda: tmp_path / "cache" / "s1")
+    eng._offload(messages, reduced)
+    saved = (tmp_path / "cache" / "s1" / "o1.txt").read_bytes().decode("utf-8")
+    assert key not in saved and "OPENAI_API_KEY=" in saved
+
+
+def test_no_redactor_no_file(tmp_path, monkeypatch):
+    messages, reduced = _one_output("o1", "x" * 9000)
+    eng = engine.JevEngine()
+    monkeypatch.setattr(eng, "_outputs_dir", lambda: tmp_path / "cache" / "s1")
+    monkeypatch.setattr(engine.JevEngine, "_redact", staticmethod(lambda text: None))
+    assert eng._offload(messages, reduced) == reduced
+    assert not (tmp_path / "cache" / "s1").exists()
+
+
+def test_hostile_tool_call_id_stays_inside(tmp_path, monkeypatch):
+    messages, reduced = _one_output("../../evil", "x" * 9000)
+    eng = engine.JevEngine()
+    monkeypatch.setattr(eng, "_outputs_dir", lambda: tmp_path / "cache" / "s1")
+    eng._offload(messages, reduced)
+    assert [p.name for p in (tmp_path / "cache" / "s1").iterdir()] == [".._.._evil.txt"]
+    assert not (tmp_path / "evil.txt").exists()
+
+
+def test_expired_outputs_are_deleted(tmp_path):
+    old = tmp_path / "s-old" / "a.txt"
+    new = tmp_path / "s-new" / "b.txt"
+    for f in (old, new):
+        f.parent.mkdir(parents=True)
+        f.write_text("output", encoding="utf-8")
+    now = time.time()
+    os.utime(old, (now - 31 * 86400, now - 31 * 86400))
+    assert engine.JevEngine._expire_outputs(tmp_path, now) == 1
+    assert not old.exists() and not old.parent.exists() and new.exists()

@@ -39,10 +39,19 @@ run the same rules and kept the same facts in every measurement.
   1.25× the trigger (at most 90% of the window's budget), the oldest dropped results keep only their fact lines,
   then become one-line notes. Below that line Hermes simply compacts again on the next turn: there is no summary
   cliff, and evicting for the target lost facts in the session model.
-- **Saved outputs** (v0.7.0): the full output of every reduced result is written to
-  `<hermes home>/jev-compaction/outputs/<session>/<tool_call_id>.txt`, and the note says where
+- **Saved outputs** (v0.7.0, hardened in v0.7.1): the full output of every reduced result is written to
+  `<hermes home>/cache/jev-compaction/<session>/<tool_call_id>.txt`, and the note says where
   (`the full output is saved at <path>; read it for anything not kept here`). A failed write leaves the note
-  pointing to `state.db`. `JEV_COMPACTION_SAVE_OUTPUTS=0` turns it off.
+  pointing to `state.db`. `JEV_COMPACTION_SAVE_OUTPUTS=0` turns it off. Since v0.7.1:
+  - the copy passes through Hermes' shared redactor (the one egress uses) first; without the redactor nothing is
+    written (fail closed);
+  - the folder is under `cache/`, which the station's backups and indexers skip (`state.db` is not backed up
+    either);
+  - saved outputs older than 30 days are deleted, once a day;
+  - ids keep only `[\w.-]`, so no id writes outside the session folder.
+  Measured on 5995 tool outputs of the evaluation transcripts: 0 values of a known secret family; masking removed
+  none of the 392 preregistered facts. The threat model is in the Claude fork's
+  [docs/security.md](https://github.com/deadczarvc-labs/jev-factkeep-compaction/blob/main/docs/security.md).
 - **Jev unreachable** (transport error, malformed answer, redactor failure): `mode = "fallback"`. Every old
   unpinned call is reduced by the same rules as a `drop_result`, with no HTTP and no summary. Before v0.5.0
   the engine returned the history unchanged (`mode = "preserve"`).

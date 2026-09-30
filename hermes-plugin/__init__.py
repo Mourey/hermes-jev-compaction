@@ -1167,7 +1167,44 @@ class JevEngine(EngineSettings):
         except Exception:  # noqa: BLE001 — outside Hermes (tests, offline runs)
             home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
         session = re.sub(r"[^\w.-]", "_", self._snapshot_session_id or "session")
-        return home / "jev-compaction" / "outputs" / session
+        # Under cache/: the station's restic backup (**/cache) and indexers skip it; state.db is not backed up either.
+        return home / "cache" / "jev-compaction" / session
+
+    # Saved outputs live as long as a Claude Code transcript by default; expired files are deleted once a day.
+    OUTPUT_MAX_AGE_S = 30 * 24 * 3600
+    _last_expiry = 0.0
+
+    @classmethod
+    def _expire_outputs(cls, root: Path, now: float | None = None) -> int:
+        """Deletes saved outputs older than OUTPUT_MAX_AGE_S under `root` and the session folders left empty."""
+        now = time.time() if now is None else now
+        removed = 0
+        try:
+            sessions = [d for d in root.iterdir() if d.is_dir()]
+        except OSError:
+            return 0
+        for session in sessions:
+            try:
+                for f in session.glob("*.txt"):
+                    if now - f.stat().st_mtime > cls.OUTPUT_MAX_AGE_S:
+                        f.unlink()
+                        removed += 1
+                if not any(session.iterdir()):
+                    session.rmdir()
+            except OSError:
+                continue
+        return removed
+
+    @staticmethod
+    def _redact(text: str) -> str | None:
+        """Hermes' shared redactor (the one egress uses) on a copy about to be saved; None when it is unavailable,
+        so nothing unredacted is written (fail closed)."""
+        try:
+            from agent.redact import redact_sensitive_text
+
+            return redact_sensitive_text(text, force=True, redact_url_credentials=True)
+        except Exception:  # noqa: BLE001 — no redactor, no file
+            return None
 
     def _offload(
         self, original: list[dict[str, Any]], out: list[dict[str, Any]]
@@ -1190,11 +1227,20 @@ class JevEngine(EngineSettings):
             if not tc_id or note not in text or tc_id not in full:
                 res.append(m)
                 continue
+            redacted = self._redact(full[tc_id])
+            if redacted is None:
+                res.append(m)
+                continue
             try:
-                base = base or self._outputs_dir()
+                if base is None:
+                    base = self._outputs_dir()
+                    now = time.time()
+                    if now - JevEngine._last_expiry > 24 * 3600:
+                        JevEngine._last_expiry = now
+                        self._expire_outputs(base.parent, now)
                 path = base / f"{re.sub(r'[^\w.-]', '_', tc_id)}.txt"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(full[tc_id].encode("utf-8"))
+                path.write_bytes(redacted.encode("utf-8"))
                 saved = f"the full output is saved at {path.as_posix()}; read it for anything not kept here"
                 res.append(dict(m, content=text.replace(note, saved)))
             except OSError:
