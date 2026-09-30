@@ -30,7 +30,7 @@ and its tail, and results up to 6000 chars stay whole. When Jev is unreachable, 
 (`mode = "fallback"`) instead of leaving the history untouched. On a blind held-out round the engine kept
 70/75 preregistered facts (v0.4.x: 13/75) at a 58% token reduction (v0.4.x: 92%). Rules and evidence:
 [docs/fact-rails.md](docs/fact-rails.md). The same rules run in Claude Code:
-[deadczarvc/jev-factkeep-compaction](https://github.com/deadczarvc/jev-factkeep-compaction).
+[deadczarvc-labs/jev-factkeep-compaction](https://github.com/deadczarvc-labs/jev-factkeep-compaction).
 
 ## What the port adds (vs upstream)
 

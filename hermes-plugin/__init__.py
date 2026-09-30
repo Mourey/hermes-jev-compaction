@@ -102,7 +102,7 @@ def _abridge(text: str, head: int, tail: int) -> str:
     )
 
 
-# Port of the fact-keeping fork of fast-jev-compaction (deadczarvc/jev-factkeep-compaction, src/compact.ts).
+# Port of the fact-keeping fork of fast-jev-compaction (deadczarvc-labs/jev-factkeep-compaction, src/compact.ts).
 # The goal both engines state: drop what re-running the tool would give back, never an exact error, path or
 # observation. Measured on one transcript (docs/fact-rails.md) the
 # drop-everything rule kept 2/6 non-reproducible facts here and 0/6 in Claude; the fork kept 6/6 there.

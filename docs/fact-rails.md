@@ -5,7 +5,7 @@ Before v0.5.0 a call Jev scored as stale was stubbed: its arguments emptied, its
 HTTP codes, errors, pids, ids, counters. A re-run of the tool does not bring them back.
 
 v0.5.0 ports the rules of the fact-keeping Claude Code fork
-([deadczarvc/jev-factkeep-compaction](https://github.com/deadczarvc/jev-factkeep-compaction)). Both engines
+([deadczarvc-labs/jev-factkeep-compaction](https://github.com/deadczarvc-labs/jev-factkeep-compaction)). Both engines
 run the same rules and kept the same facts in every measurement.
 
 ## Rules
@@ -36,7 +36,7 @@ run the same rules and kept the same facts in every measurement.
 ## Evidence
 
 The method is the same as in the Claude fork's
-[docs/evidence.md](https://github.com/deadczarvc/jev-factkeep-compaction/blob/main/docs/evidence.md):
+[docs/evidence.md](https://github.com/deadczarvc-labs/jev-factkeep-compaction/blob/main/docs/evidence.md):
 
 - real Claude Code subagent transcripts, replayed through the Hermes engine;
 - facts preregistered with sha256 before any run;
