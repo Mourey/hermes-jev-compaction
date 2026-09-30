@@ -24,6 +24,7 @@ import math
 import os
 import re
 import time
+import zlib
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -295,6 +296,63 @@ def fact_lines(text: str, budget: int) -> list[str]:
     return [line for _, line in sorted(picked)]
 
 
+def mdl_lines(text: str, budget: int) -> list[str]:
+    """Chunks ranked by conditional compressed length (MDL), as the fork's Codex sheet (src/codex.ts `mdlLines`).
+
+    A 200-char chunk scores its raw-deflate size with the preceding 32 KB of the same output as dictionary, per char:
+    ids, hashes, verdicts and errors do not compress against what came before; repeated rows and boilerplate do.
+    Taken by score until the budget, returned in text order.
+    """
+    chunks: list[tuple[str, int]] = []
+    at = 0
+    for line in text.split("\n"):
+        for k in range(0, max(1, len(line)), 200):
+            chunks.append((line[k : k + 200], at + k))
+        at += len(line) + 1
+    scored: list[tuple[float, int, str]] = []
+    for i, (chunk, pos) in enumerate(chunks):
+        if len(re.sub(r"\s", "", chunk)) < 4:
+            scored.append((0.0, i, chunk))
+            continue
+        dictionary = text[max(0, pos - 32_768) : pos].encode("utf-8")
+        comp = (
+            zlib.compressobj(
+                -1, zlib.DEFLATED, -15, 8, zlib.Z_DEFAULT_STRATEGY, dictionary
+            )
+            if dictionary
+            else zlib.compressobj(-1, zlib.DEFLATED, -15)
+        )
+        size = len(comp.compress(chunk.encode("utf-8")) + comp.flush())
+        scored.append((size / (len(chunk) + 16), i, chunk))
+    picked: list[tuple[int, str]] = []
+    used = 0
+    for score, i, chunk in sorted(scored, key=lambda x: (-x[0], x[1])):
+        if score == 0 or used + len(chunk) + 1 > budget:
+            continue
+        picked.append((i, chunk))
+        used += len(chunk) + 1
+    return [chunk for _, chunk in sorted(picked)]
+
+
+def hybrid_lines(text: str, budget: int) -> list[str]:
+    """Regex fact lines within half the budget, then MDL chunks not already inside them (fork: JEV-CMP-25)."""
+    regex = fact_lines(text, budget // 2)
+    used = sum(len(ln) + 1 for ln in regex)
+    return regex + [
+        c for c in mdl_lines(text, budget - used) if not any(c in ln for ln in regex)
+    ]
+
+
+def matched_hybrid_lines(text: str, budget: int) -> list[str]:
+    """The hybrid within the chars the regex selection alone would take, so a stub never grows.
+
+    Frozen benchmark (1161 facts, 35 sessions; goal/g06): tier 2 +2.1 pts [+0.8, +4.0] at -1.7% length, tiers 0/1/3
+    non-inferior (lower bounds -1.5, -1.4, -1.6 pts). The plain hybrid kept more at tier 3 but made stubs 2-4% longer.
+    """
+    used = sum(len(ln) + 1 for ln in fact_lines(text, budget))
+    return hybrid_lines(text, used) if used else []
+
+
 # Hard rails for an observation, same as the fact-keeping fork (src/compact.ts, held-out round 0):
 # a short result is never cut; head and tail end on line boundaries; the fact-line budget grows with the result;
 # the note says where the full output still is (Hermes keeps every original tool message in state.db).
@@ -353,8 +411,10 @@ def fact_stub(
     is_error: bool,
     tool_call_id: str | None = None,
     rails: dict | None = None,
+    select=None,
 ) -> str:
     """A reduced result that keeps its head, its fact lines and its tail; an error keeps more."""
+    select = select or matched_hybrid_lines
     rails = rails or RAIL_TIERS[0]
     head_keep = max(FACT_HEAD_CHARS, ERROR_KEEP_CHARS) if is_error else FACT_HEAD_CHARS
     if len(text) <= max(rails["small"], head_keep + FACT_TAIL_CHARS + 120):
@@ -371,7 +431,7 @@ def fact_stub(
     tail_start = (
         len(text) - FACT_TAIL_CHARS if tail_nl in (-1, len(text) - 1) else tail_nl + 1
     )
-    facts = fact_lines(
+    facts = select(
         text[head_end:tail_start],
         max(FACT_BUDGET_CHARS, int(len(text) * rails["share"])),
     )
