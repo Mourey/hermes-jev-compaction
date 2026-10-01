@@ -1,4 +1,4 @@
-# Fact rails (v0.5.0, refined in v0.6.0 and v0.7.0)
+# Fact rails (v0.5.0, refined in v0.6.0, v0.7.0 and v0.7.2)
 
 Before v0.5.0 a call Jev scored as stale was stubbed: its arguments emptied, its result replaced by
 `dropped by jev-compaction`, or cut to a head. On real transcripts that lost most non-reproducible facts:
@@ -101,6 +101,27 @@ divided by the session's length in windows. Facts kept in the context:
 - At 1.5 windows v0.6.0 let the prompt grow to 79% of the window; v0.7.0 stays at or under 65%.
 - The blind facts are those of the fork's round 6; the eviction line (1.25× the trigger) was chosen on the same
   simulation, so this table is not a fresh blind round.
+
+## Past use first (v0.7.2)
+
+A fact stub's lines now start with the lines that hold a token the agent already used: a token with a digit that a tool
+result introduced and a later tool call's arguments repeated (`reused_tokens`, `reuse_first_lines`). The regex fact
+lines fill the rest of the same budget, so no stub grows.
+
+Scored on what agents act on — tokens with a digit first introduced by an output and used by the agent after a
+compaction at 50% or 75% of the session (85 transcripts, 35 sessions; the fork's `goal/g08` label):
+
+| rail tier | change | 95% CI (clustered by session) |
+|---|---|---|
+| 0–1 | +1.7 … +1.8 pts | above 0 |
+| 2 | +6.8 … +7.6 | above 0 |
+| 3 | +7.9 … +9.1 | above 0 |
+
+On tokens without digits (paths, identifiers) it changes −0.7 … +0.6 pts, and on both kinds together +0.5 … +2.0 with
+every lower bound above −0.5. Pinning a quota of digit-token lines does about as well, so the fair reading is that the
+regex fact lines underweight lines with ids, versions and numbers. A compressibility selector tried on the way kept more
+experimenter-chosen facts but fewer of these tokens (−1.6 … −6.7) and was reverted before release. The data are
+in-sample; the rules were written before each run.
 
 ## Price
 
