@@ -56,7 +56,8 @@ The plugin declares these `userConfig` values in
 | `maxRequestTokens` | `30000` |
 | `truncateHeadChars` | `300` |
 | `model` | `jev-latest` |
-| `baseUrl` | the TypeSafe endpoint |
+| `provider` | unset (`FAST_JEV_PROVIDER`, else by available key) |
+| `baseUrl` | unset (`FAST_JEV_BASE_URL`, else the provider's endpoint) |
 | `envFile` | unset |
 
 The key can be supplied as the sensitive `apiKey` plugin option, or through
@@ -65,14 +66,17 @@ settings' `env` block, or in the dotenv file `envFile` names. The environment
 variable is the recommended development setup; `envFile` is for a key that
 should not sit in a settings file.
 
-`baseUrl` is unset by default, which reaches
-`https://api.typesafe.ai/v1/systemone` as before. Set it to
-`https://openrouter.ai/api/alpha/decisions` with `model` left at `jev-latest`
-to reach the same Jev model through OpenRouter. `envFile` is read only when
-nothing earlier held a key, and a file that cannot be read is not an error:
-the key is simply not there, and the hook falls back as it would.
+The endpoint follows the rules in the root README ("Choosing the endpoint"):
+`baseUrl`, then `provider`, then the same two names read from the environment
+or the settings' `env` block (`FAST_JEV_BASE_URL`, `FAST_JEV_PROVIDER`), then
+TypeSafe when `TYPESAFE_API_KEY` is present, else OpenRouter when only
+`OPENROUTER_API_KEY` is. The key sent is the endpoint's own name first, so
+with both keys set and `provider` = `openrouter` the OpenRouter key goes to
+OpenRouter. `envFile` fills in only key names missing from the environment and
+the settings, and a file that cannot be read is not an error: the key is simply
+not there, and the hook falls back as it would.
 
-Every option except `apiKey`, `baseUrl`, `envFile`, `compactAtPercent`,
+Every option except `apiKey`, `provider`, `baseUrl`, `envFile`, `compactAtPercent`,
 `minReductionRatio` and `model` is passed straight to the library; see the root
 README for what they do. The `session.compact` hook runs the Jev requests concurrently. If Jev fails,
 the response is malformed, the key is unavailable, the history cannot be

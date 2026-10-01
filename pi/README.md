@@ -98,7 +98,15 @@ compaction estimate, not a tokenizer or response-time measurement.
 | `--jev-max-request-tokens` | `30000` | Estimated Jev request budget. |
 | `--jev-truncate-head-chars` | `300` | Characters retained before a result marker. |
 | `--jev-timeout-ms` | `0` | Extra scoring deadline in milliseconds; `0` disables it. |
-| `--jev-model` | `jev-latest` | TypeSafe scoring model. |
+| `--jev-model` | `jev-latest` | Jev scoring model. |
+| `--jev-provider` | `FAST_JEV_PROVIDER`, else by available key | `typesafe` or `openrouter`. |
+| `--jev-base-url` | `FAST_JEV_BASE_URL`, else the provider's | Jev endpoint URL. |
+
+The key is `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY`: with only an OpenRouter
+key, Jev runs through `https://openrouter.ai/api/alpha/decisions`; with both,
+TypeSafe is used unless `--jev-provider openrouter` (or
+`FAST_JEV_PROVIDER=openrouter`) is set. `/jev status` shows the endpoint and
+whether its key is configured.
 | `--jev-disabled` | `false` | Starts with native Pi summarization only. |
 
 ## Commands

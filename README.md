@@ -92,21 +92,36 @@ method) and call `compact(messages, asker, options)`; `buildJevRequest` and
 The building blocks (`collectToolCalls`, `fitState`, `batchCalls`,
 `decideCall`, `applyDecisions`) are exported too.
 
-`apiKey` defaults to `process.env.TYPESAFE_API_KEY`. Never commit the key or
-put it in a source file.
+Never commit the key or put it in a source file.
 
-`baseUrl` picks the Jev endpoint. Left unset it is the TypeSafe one; the same
-Jev model is also served through OpenRouter, at
-`https://openrouter.ai/api/alpha/decisions`, with `model` left at
-`jev-latest` and an OpenRouter key in place of a TypeSafe one.
+### Choosing the endpoint: TypeSafe or OpenRouter
+
+The same Jev model is served by TypeSafe (`https://api.typesafe.ai/v1/systemone`,
+`TYPESAFE_API_KEY`) and by OpenRouter's Decisions endpoint
+(`https://openrouter.ai/api/alpha/decisions`, `OPENROUTER_API_KEY`), with the
+same request and `answers` response; `model` can stay at `jev-latest`. Every
+integration (the library, Claude Code, Pi and Codex) resolves the endpoint and
+key the same way (`src/endpoint.ts`):
+
+1. Endpoint: an explicit base URL (`baseUrl` option, `FAST_JEV_BASE_URL`, or
+   `TYPESAFE_BASE_URL`) wins; else the provider (`provider` option or
+   `FAST_JEV_PROVIDER`, `typesafe` or `openrouter`); else TypeSafe when
+   `TYPESAFE_API_KEY` is set; else OpenRouter when only `OPENROUTER_API_KEY` is.
+2. Key: an explicit `apiKey` / `FAST_JEV_API_KEY` wins; else the endpoint's own
+   variable, with the other one as a fallback. With both keys set and OpenRouter
+   chosen, the OpenRouter key is sent.
+
+So an OpenRouter-only setup needs nothing but `OPENROUTER_API_KEY`; with both
+keys set, add `FAST_JEV_PROVIDER=openrouter` to use OpenRouter.
 
 ## Options
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `apiKey` | `TYPESAFE_API_KEY` | TypeSafe API key (`compactMessages`/`JevClient`) |
+| `apiKey` | the endpoint's key | TypeSafe or OpenRouter key (`compactMessages`/`JevClient`); `''` means none |
 | `model` | `jev-latest` | Jev model name |
-| `baseUrl` | `https://api.typesafe.ai/v1/systemone` | System One endpoint |
+| `provider` | `FAST_JEV_PROVIDER`, else by available key | `typesafe` or `openrouter` |
+| `baseUrl` | `FAST_JEV_BASE_URL`, else the provider's | Jev endpoint |
 | `fetch` | native `fetch` | Injectable fetch implementation for tests |
 | `goal` | last 3 user prompts | Ongoing task description included in the state |
 | `keepThreshold` | `0.5` | Minimum keep probability for a call or result to stay |
@@ -210,9 +225,11 @@ To install the fork branch before the upstream merge:
 pi install git:github.com/MiguelMachado-dev/fast-jev-compaction@feat/pi-extension
 ```
 
-Set `TYPESAFE_API_KEY` in the environment that starts Pi. Without a key the
-extension lets Pi produce its native summary and `/jev status` reports the
-missing key.
+Set `TYPESAFE_API_KEY` or `OPENROUTER_API_KEY` in the environment that starts
+Pi (see "Choosing the endpoint"; `--jev-provider openrouter` or
+`FAST_JEV_PROVIDER=openrouter` picks OpenRouter when both are set). Without a
+key the extension lets Pi produce its native summary and `/jev status` reports
+the missing key.
 
 For an interactive Windows check with the user's existing `openai-codex`
 authentication and `gpt-6-astra` at `xhigh`, use:
