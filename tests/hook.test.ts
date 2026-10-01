@@ -6,6 +6,7 @@ import {
   dotenvKey,
   getApiKey,
   jevAsker,
+  resolveEndpoint,
   resolveHookConfig,
   summarize,
   toSessionMessages,
@@ -79,6 +80,7 @@ describe('hook config', () => {
       envFile: '/tmp/.env',
     });
     expect(resolveHookConfig({ baseUrl: '', envFile: '' })).not.toHaveProperty('baseUrl');
+    expect(resolveHookConfig({ provider: 'openrouter' })).toMatchObject({ provider: 'openrouter' });
   });
 });
 
@@ -120,6 +122,72 @@ describe('api key resolution', () => {
     // A missing file is not an error: the key is simply not there.
     expect(await getApiKey(keyEngine({}), config)).toBeUndefined();
     expect(await getApiKey(keyEngine({}), { ...config, envFile: undefined })).toBeUndefined();
+  });
+});
+
+describe('endpoint resolution', () => {
+  const openrouter = 'https://openrouter.ai/api/alpha/decisions';
+  const both = { TYPESAFE_API_KEY: 'ts', OPENROUTER_API_KEY: 'or' };
+
+  it('sends OpenRouter its own key when both keys are set', async () => {
+    const config = resolveHookConfig({ baseUrl: openrouter });
+    expect(await resolveEndpoint(keyEngine({ env: both }), config)).toMatchObject({
+      baseUrl: openrouter,
+      apiKey: 'or',
+      keyName: 'OPENROUTER_API_KEY',
+    });
+    expect(
+      await resolveEndpoint(keyEngine({ env: both }), resolveHookConfig({ provider: 'openrouter' })),
+    ).toMatchObject({ baseUrl: openrouter, apiKey: 'or' });
+  });
+
+  it('picks OpenRouter when it holds the only key, TypeSafe otherwise', async () => {
+    const config = resolveHookConfig({});
+    expect(await resolveEndpoint(keyEngine({ env: { OPENROUTER_API_KEY: 'or' } }), config)).toMatchObject({
+      baseUrl: openrouter,
+      apiKey: 'or',
+    });
+    expect(await resolveEndpoint(keyEngine({ env: both }), config)).toMatchObject({
+      baseUrl: 'https://api.typesafe.ai/v1/systemone',
+      apiKey: 'ts',
+    });
+  });
+
+  it('reads FAST_JEV_PROVIDER and FAST_JEV_BASE_URL from the environment or the settings', async () => {
+    const config = resolveHookConfig({});
+    expect(
+      await resolveEndpoint(keyEngine({ env: { ...both, FAST_JEV_PROVIDER: 'openrouter' } }), config),
+    ).toMatchObject({ baseUrl: openrouter, apiKey: 'or' });
+    expect(
+      await resolveEndpoint(
+        keyEngine({ env: both, settings: { env: { FAST_JEV_BASE_URL: 'http://local/jev' } } }),
+        config,
+      ),
+    ).toMatchObject({ baseUrl: 'http://local/jev', provider: 'custom', apiKey: 'ts' });
+    // The plugin option wins over the environment.
+    expect(
+      await resolveEndpoint(
+        keyEngine({ env: { ...both, FAST_JEV_PROVIDER: 'openrouter' } }),
+        resolveHookConfig({ provider: 'typesafe' }),
+      ),
+    ).toMatchObject({ apiKey: 'ts' });
+  });
+
+  it('fills a key missing elsewhere from the dotenv file', async () => {
+    const engine = keyEngine({
+      env: { TYPESAFE_API_KEY: 'ts' },
+      files: { '/k.env': 'OPENROUTER_API_KEY=or-file\n' },
+    });
+    expect(
+      await resolveEndpoint(engine, resolveHookConfig({ provider: 'openrouter', envFile: '/k.env' })),
+    ).toMatchObject({ apiKey: 'or-file' });
+  });
+
+  it('names the missing key for the endpoint', async () => {
+    const config = { ...resolveHookConfig({ preserveRecentMessages: 1 }), keyName: 'OPENROUTER_API_KEY' as const };
+    await expect(compactSession(transcript(), config, jevFetch(() => 0))).rejects.toThrow(
+      /OPENROUTER_API_KEY is not configured/,
+    );
   });
 });
 

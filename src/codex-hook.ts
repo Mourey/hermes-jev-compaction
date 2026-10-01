@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 
 import { JevClient } from './client.js';
 import { compact } from './compact.js';
+import { jevEndpointFromEnv } from './endpoint.js';
 import {
   codexRecordsToMessages,
   recordFromCodexHook,
@@ -79,15 +80,18 @@ async function run(): Promise<void> {
 
   const records = await readRecords(path);
   if (records.length === 0) return;
-  const apiKey = process.env.TYPESAFE_API_KEY;
-  if (!apiKey) {
+  const endpoint = jevEndpointFromEnv(process.env);
+  if (!endpoint.apiKey) {
     process.stdout.write(JSON.stringify({
-      systemMessage: 'Fast Jev Compaction skipped context restoration because TYPESAFE_API_KEY is not configured.',
+      systemMessage: `Fast Jev Compaction skipped context restoration because ${endpoint.keyName} is not configured.`,
     }));
     return;
   }
 
-  const clientOptions: { apiKey: string; model?: string } = { apiKey };
+  const clientOptions: { apiKey: string; baseUrl: string; model?: string } = {
+    apiKey: endpoint.apiKey,
+    baseUrl: endpoint.baseUrl,
+  };
   if (process.env.FAST_JEV_MODEL) clientOptions.model = process.env.FAST_JEV_MODEL;
   const result = await compact(
     codexRecordsToMessages(records),

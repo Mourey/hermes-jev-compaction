@@ -10,6 +10,7 @@ import type {
 
 import { compact, reductionRatio, resolveOptions } from '../src/compact.js';
 import { parseEnv } from '../src/dotenv.js';
+import { resolveJevEndpoint, type JevEndpoint, type JevKeyName, type JevKeys } from '../src/endpoint.js';
 import { buildJevRequest, DEFAULT_MODEL, parseJevResponse } from '../src/request.js';
 import type {
   CompactOptions,
@@ -43,8 +44,12 @@ export type HookFetch = (url: string, init?: HookFetchInit) => Promise<HookFetch
 
 export type HookConfig = CompactOptions & {
   apiKey?: string;
-  /** Jev endpoint; unset reaches TypeSafe directly, as the library defaults to. */
+  /** Jev endpoint; unset follows `provider`, then whichever key is present. */
   baseUrl?: string;
+  /** `typesafe` or `openrouter`; unset picks TypeSafe when its key is present. */
+  provider?: string;
+  /** The key name a missing key is reported under. */
+  keyName?: JevKeyName;
   /** A dotenv file to read the key from when the environment has none. */
   envFile?: string;
   compactAtPercent: number;
@@ -89,6 +94,8 @@ export function resolveHookConfig(options: PluginOptions): HookConfig {
   if (apiKey) config.apiKey = apiKey;
   const baseUrl = optionString(options, 'baseUrl');
   if (baseUrl) config.baseUrl = baseUrl;
+  const provider = optionString(options, 'provider');
+  if (provider) config.provider = provider;
   const envFile = optionString(options, 'envFile');
   if (envFile) config.envFile = envFile;
   const goal = optionString(options, 'goal');
@@ -181,7 +188,7 @@ export async function compactSession(
   config: HookConfig,
   fetchFn: HookFetch,
 ): Promise<SessionCompaction> {
-  if (!config.apiKey) throw new Error('TYPESAFE_API_KEY is not configured');
+  if (!config.apiKey) throw new Error(`${config.keyName ?? 'TYPESAFE_API_KEY'} is not configured`);
   const result = await compact(
     messages,
     jevAsker(fetchFn, config.apiKey, config.model, config.baseUrl),
@@ -252,6 +259,24 @@ function settingEnv(settings: Readonly<Record<string, unknown>>, name: string): 
   return typeof value === 'string' && value ? value : undefined;
 }
 
+/** The Jev keys the given dotenv file holds; empty when it cannot be read. */
+export async function dotenvKeys(
+  $: { fs: { read: (path: string) => Promise<string> } },
+  path: string,
+): Promise<JevKeys> {
+  const keys: JevKeys = {};
+  try {
+    const parsed = parseEnv(await $.fs.read(path));
+    for (const name of KEY_NAMES) {
+      const value = parsed[name];
+      if (value) keys[name] = value;
+    }
+  } catch {
+    // A missing or unreadable file is not an error: the key is simply not there.
+  }
+  return keys;
+}
+
 /**
  * The key the given dotenv file holds, or `undefined` when it cannot be read.
  * An absolute path is read as given; a relative one is under the session's
@@ -261,40 +286,49 @@ export async function dotenvKey(
   $: { fs: { read: (path: string) => Promise<string> } },
   path: string,
 ): Promise<string | undefined> {
-  try {
-    const parsed = parseEnv(await $.fs.read(path));
-    for (const name of KEY_NAMES) {
-      const value = parsed[name];
-      if (value) return value;
-    }
-  } catch {
-    // A missing or unreadable file is not an error: the key is simply not there.
-  }
-  return undefined;
+  const keys = await dotenvKeys($, path);
+  return keys.TYPESAFE_API_KEY ?? keys.OPENROUTER_API_KEY;
 }
 
-export async function getApiKey(
-  $: {
-    env: { get: (name: string) => Promise<string | undefined> };
-    settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
-    fs: { read: (path: string) => Promise<string> };
-  },
-  config: HookConfig,
-): Promise<string | undefined> {
-  if (config.apiKey) return config.apiKey;
+type KeyEngine = {
+  env: { get: (name: string) => Promise<string | undefined> };
+  settings: { read: () => Promise<Readonly<Record<string, unknown>>> };
+  fs: { read: (path: string) => Promise<string> };
+};
+
+/**
+ * The endpoint and key for this compaction. Each value comes from the plugin
+ * option, then the environment, then the settings' `env` block; keys missing
+ * from all three are read from `envFile`. The key sent is the endpoint's own
+ * (`OPENROUTER_API_KEY` for OpenRouter), the other name being the fallback.
+ */
+export async function resolveEndpoint($: KeyEngine, config: HookConfig): Promise<JevEndpoint> {
+  const settings = await $.settings.read();
   // The names are spelled literally: `claude plugin validate` reads them off
   // this source, and a name it cannot see is refused.
-  const fromEnv = await $.env.get('TYPESAFE_API_KEY');
-  if (fromEnv) return fromEnv;
-  const fromOpenRouter = await $.env.get('OPENROUTER_API_KEY');
-  if (fromOpenRouter) return fromOpenRouter;
-  const settings = await $.settings.read();
-  for (const name of KEY_NAMES) {
-    const value = settingEnv(settings, name);
-    if (value) return value;
+  const keys: JevKeys = {
+    TYPESAFE_API_KEY: (await $.env.get('TYPESAFE_API_KEY')) || settingEnv(settings, 'TYPESAFE_API_KEY'),
+    OPENROUTER_API_KEY:
+      (await $.env.get('OPENROUTER_API_KEY')) || settingEnv(settings, 'OPENROUTER_API_KEY'),
+  };
+  if (!config.apiKey && config.envFile && KEY_NAMES.some((name) => !keys[name])) {
+    const fromFile = await dotenvKeys($, config.envFile);
+    for (const name of KEY_NAMES) keys[name] ||= fromFile[name];
   }
-  if (config.envFile) return dotenvKey($, config.envFile);
-  return undefined;
+  return resolveJevEndpoint({
+    apiKey: config.apiKey,
+    baseUrl:
+      config.baseUrl ??
+      ((await $.env.get('FAST_JEV_BASE_URL')) || settingEnv(settings, 'FAST_JEV_BASE_URL')),
+    provider:
+      config.provider ??
+      ((await $.env.get('FAST_JEV_PROVIDER')) || settingEnv(settings, 'FAST_JEV_PROVIDER')),
+    keys,
+  });
+}
+
+export async function getApiKey($: KeyEngine, config: HookConfig): Promise<string | undefined> {
+  return (await resolveEndpoint($, config)).apiKey;
 }
 
 function notify(
@@ -316,7 +350,13 @@ export const register: Register = (on: On, options: PluginOptions) => {
 
   on('session.compact', async ($, event, next) => {
     try {
-      const config = { ...configured, apiKey: await getApiKey($, configured) };
+      const endpoint = await resolveEndpoint($, configured);
+      const config: HookConfig = {
+        ...configured,
+        apiKey: endpoint.apiKey,
+        baseUrl: endpoint.baseUrl,
+        keyName: endpoint.keyName,
+      };
       const { result, messages } = await compactSession(event.messages, config, async (url, init) => {
         const response = await $.http.fetch(url, init);
         return { status: response.status, ok: response.ok, text: response.text };

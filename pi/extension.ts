@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { estimateTokens, sessionEntryToContextMessages } from '@earendil-works/pi-coding-agent';
 import { DEFAULT_OPTIONS, reductionRatio } from '../src/compact.js';
+import { jevEndpointFromEnv, parseProvider, type JevEndpoint } from '../src/endpoint.js';
 import { DEFAULT_MODEL } from '../src/request.js';
 import type { CompactOptions, CompactResult } from '../src/types.js';
 import { compactPiMessages } from './adapter.js';
@@ -16,6 +17,9 @@ export interface PiConfig extends CompactOptions {
   minReductionRatio: number;
   model: string;
   timeoutMs: number;
+  /** Empty means: from the environment, then automatic. */
+  provider: string;
+  baseUrl: string;
 }
 
 function describe(stats: CompactResult['stats']): string {
@@ -39,6 +43,8 @@ export default function registerPiExtension(pi: ExtensionAPI): void {
     pi.registerFlag(name, { description, type: 'string', default: String(value) });
   }
   pi.registerFlag('jev-model', { description: 'TypeSafe compaction model', type: 'string', default: DEFAULT_MODEL });
+  pi.registerFlag('jev-provider', { description: 'Jev provider: typesafe or openrouter (default: FAST_JEV_PROVIDER, else by available key)', type: 'string', default: '' });
+  pi.registerFlag('jev-base-url', { description: 'Jev endpoint URL (default: FAST_JEV_BASE_URL, else the provider endpoint)', type: 'string', default: '' });
   pi.registerFlag('jev-disabled', { description: 'Start with native Pi summarization only', type: 'boolean', default: false });
 
   let config: PiConfig | undefined;
@@ -59,6 +65,13 @@ export default function registerPiExtension(pi: ExtensionAPI): void {
     if (ctx.hasUI) ctx.ui.setStatus('fast-jev-pi', `Jev: ${enabled ? status : 'off'}`);
   }
 
+  function endpoint(): JevEndpoint {
+    return jevEndpointFromEnv(process.env, {
+      provider: config?.provider || undefined,
+      baseUrl: config?.baseUrl || undefined,
+    });
+  }
+
   function invalidate(): void {
     generation++;
     active?.abort();
@@ -77,7 +90,19 @@ export default function registerPiExtension(pi: ExtensionAPI): void {
     }
     const model = pi.getFlag('jev-model') ?? DEFAULT_MODEL;
     if (typeof model !== 'string' || !model.trim()) throw new Error('Invalid --jev-model');
+    const text = (name: string): string => {
+      const raw = pi.getFlag(name);
+      return typeof raw === 'string' ? raw.trim() : '';
+    };
+    const provider = text('jev-provider');
+    if (provider && !parseProvider(provider)) throw new Error('Invalid --jev-provider');
+    const baseUrl = text('jev-base-url');
+    if (baseUrl) {
+      try { new URL(baseUrl); } catch { throw new Error('Invalid --jev-base-url'); }
+    }
     return {
+      provider,
+      baseUrl,
       compactAtPercent: number('jev-compact-at-percent', 60, 0, 100, false),
       minReductionRatio: number('jev-min-reduction-ratio', 0.25, 0, 1, false),
       keepThreshold: number('jev-keep-threshold', DEFAULT_OPTIONS.keepThreshold, 0, 1, false),
@@ -143,13 +168,15 @@ export default function registerPiExtension(pi: ExtensionAPI): void {
       notify(ctx, status, true);
       showStatus(ctx);
     };
-    const apiKey = process.env.TYPESAFE_API_KEY?.trim();
-    if (!apiKey) { fallback('TYPESAFE_API_KEY missing'); return; }
+    const target = endpoint();
+    if (!target.apiKey) { fallback(`${target.keyName} missing`); return; }
     const epoch = generation;
     const settings = config;
     const sessionId = ctx.sessionManager.getSessionId();
     const leafId = ctx.sessionManager.getLeafId();
-    const transport = createJevTransport(apiKey, settings.timeoutMs, event.signal, fetch, settings.model);
+    const transport = createJevTransport(
+      target.apiKey, settings.timeoutMs, event.signal, fetch, settings.model, target.baseUrl, target.keyName,
+    );
     active = transport;
     try {
       status = 'compacting';
@@ -269,7 +296,9 @@ export default function registerPiExtension(pi: ExtensionAPI): void {
       if (!initialized) hydrate(ctx);
       const command = args.trim() || 'status';
       if (command === 'status') {
-        notify(ctx, `${enabled ? status : 'off'}; API key ${process.env.TYPESAFE_API_KEY?.trim() ? 'configured' : 'missing'}; ` +
+        const target = endpoint();
+        notify(ctx, `${enabled ? status : 'off'}; ${target.provider} (${target.baseUrl}); ` +
+          `${target.keyName} ${target.apiKey ? 'configured' : 'missing'}; ` +
           `auto at ${config?.compactAtPercent ?? 60}%; minimum reduction ${Math.round((config?.minReductionRatio ?? 0.25) * 100)}%`);
       } else if (command === 'decisions') {
         notify(ctx, lastDecisions.map(decision => `${decision.id}:${decision.tool}:${decision.action} ` +

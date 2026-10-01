@@ -252,6 +252,8 @@ describe('Pi native compaction extension', () => {
       'jev-truncate-head-chars': expect.objectContaining({ type: 'string', default: '300' }),
       'jev-timeout-ms': expect.objectContaining({ type: 'string', default: '0' }),
       'jev-model': expect.objectContaining({ type: 'string', default: 'jev-latest' }),
+      'jev-provider': expect.objectContaining({ type: 'string', default: '' }),
+      'jev-base-url': expect.objectContaining({ type: 'string', default: '' }),
       'jev-disabled': expect.objectContaining({ type: 'boolean', default: false }),
     });
     expect([...harness.commands.keys()]).toEqual(['jev']);
@@ -345,6 +347,53 @@ describe('Pi native compaction extension', () => {
     expect(afterOff.messages.some((message: AnyRecord) => message.role === 'toolResult' && message.toolCallId === 'old-read')).toBe(false);
     expect(JSON.stringify(afterOff.messages)).not.toContain(fixture.droppedOutput);
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('reaches OpenRouter with only an OpenRouter key, or when asked to with both', async () => {
+    const calls: Array<{ url: string; auth: string | null }> = [];
+    const recording = scoringFetch(() => 0.1);
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(url), auth: new Headers(init?.headers).get('authorization') });
+      return recording(url, init);
+    }));
+
+    vi.stubEnv('TYPESAFE_API_KEY', '');
+    vi.stubEnv('OPENROUTER_API_KEY', 'or-key');
+    const onlyOpenRouter = makeHarness({ 'jev-preserve-recent': '0' });
+    await register(onlyOpenRouter);
+    await start(onlyOpenRouter);
+    appendTranscript(onlyOpenRouter.session);
+    await expect(beforeCompact(onlyOpenRouter)).resolves.toHaveProperty('compaction');
+    expect(calls).toEqual([{ url: 'https://openrouter.ai/api/alpha/decisions', auth: 'Bearer or-key' }]);
+
+    calls.length = 0;
+    vi.stubEnv('TYPESAFE_API_KEY', 'ts-key');
+    const both = makeHarness({ 'jev-preserve-recent': '0', 'jev-provider': 'openrouter' });
+    await register(both);
+    await start(both);
+    appendTranscript(both.session);
+    await expect(beforeCompact(both)).resolves.toHaveProperty('compaction');
+    expect(calls).toEqual([{ url: 'https://openrouter.ai/api/alpha/decisions', auth: 'Bearer or-key' }]);
+    await command(both, 'status');
+    expect(both.ctx.ui.notify).toHaveBeenLastCalledWith(
+      expect.stringContaining('openrouter (https://openrouter.ai/api/alpha/decisions); OPENROUTER_API_KEY configured'),
+      'info',
+    );
+
+    calls.length = 0;
+    const typesafeDefault = makeHarness({ 'jev-preserve-recent': '0' });
+    await register(typesafeDefault);
+    await start(typesafeDefault);
+    appendTranscript(typesafeDefault.session);
+    await beforeCompact(typesafeDefault);
+    expect(calls).toEqual([{ url: 'https://api.typesafe.ai/v1/systemone', auth: 'Bearer ts-key' }]);
+  });
+
+  it('rejects an unknown --jev-provider instead of guessing', async () => {
+    const harness = makeHarness({ 'jev-provider': 'anthropic' });
+    await register(harness);
+    await start(harness);
+    expect(harness.ctx.ui.notify).toHaveBeenCalledWith('Jev: Invalid --jev-provider', 'warning');
   });
 
   it('falls back to Pi native compaction for missing credentials, low reduction, request failure, and timeout', async () => {
