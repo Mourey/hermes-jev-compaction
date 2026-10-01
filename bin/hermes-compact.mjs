@@ -6,12 +6,21 @@
 // object with a `messages` array; JSONL also accepted), compacts it with the
 // fast-jev-compaction library, and writes the compacted transcript.
 //
-// The API key comes from the TYPESAFE_API_KEY environment variable (never
-// pass it as an argument). Default model `jev-latest` (currently resolves to
-// jev-1.13.0); pin explicitly with --model jev-1.13.0.
+// The API key comes from the environment (never pass it as an argument):
+// FAST_JEV_API_KEY, else TYPESAFE_API_KEY / OPENROUTER_API_KEY, the endpoint's
+// own name first. The endpoint is --base-url / FAST_JEV_BASE_URL, else
+// --provider / FAST_JEV_PROVIDER (typesafe | openrouter), else TypeSafe, or
+// OpenRouter when only OPENROUTER_API_KEY is set. Default model `jev-latest`
+// (currently resolves to jev-1.13.0); pin explicitly with --model jev-1.13.0.
 
 import { readFileSync, writeFileSync } from 'node:fs';
-import { collectToolCalls, compactMessages, resolveOptions } from '../dist/index.js';
+import {
+  collectToolCalls,
+  compactMessages,
+  jevEndpointFromEnv,
+  parseProvider,
+  resolveOptions,
+} from '../dist/index.js';
 import { fromHermes, hermesGoal, toHermes } from '../dist/hermes.js';
 
 function usage(code) {
@@ -30,10 +39,14 @@ function usage(code) {
     '  --max-state-tokens <n>    state token ceiling (default 25000)',
     '  --max-request-tokens <n>  request token ceiling (default 30000)',
     '  --truncate-head <n>       chars kept of a dropped result (default 300)',
+    '  --provider <name>         typesafe | openrouter (default: FAST_JEV_PROVIDER, else by key)',
+    '  --base-url <url>          explicit Jev endpoint; wins over --provider',
     '  --dry-run                 map and report only; no Jev requests, no key needed',
     '  -h, --help                this help',
     '',
-    'Env: TYPESAFE_API_KEY (required unless --dry-run).',
+    'Env: TYPESAFE_API_KEY or OPENROUTER_API_KEY (or FAST_JEV_API_KEY; required unless --dry-run);',
+    '     FAST_JEV_PROVIDER, FAST_JEV_BASE_URL (or TYPESAFE_BASE_URL).',
+    'With only OPENROUTER_API_KEY set, requests go to OpenRouter.',
   ];
   console.error(lines.join('\n'));
   process.exit(code);
@@ -69,6 +82,16 @@ function parseArgs(argv) {
       case '--max-state-tokens': opts.maxStateTokens = number(); break;
       case '--max-request-tokens': opts.maxRequestTokens = number(); break;
       case '--truncate-head': opts.truncateHeadChars = number(); break;
+      case '--provider': {
+        const value = next();
+        if (!parseProvider(value)) {
+          console.error(`unknown provider: ${value} (typesafe | openrouter)`);
+          usage(2);
+        }
+        opts.provider = value;
+        break;
+      }
+      case '--base-url': opts.baseUrl = next(); break;
       case '--dry-run': opts.dryRun = true; break;
       case '--help': case '-h': usage(0); break;
       default:
@@ -125,15 +148,16 @@ if (opts.dryRun) {
   process.exit(0);
 }
 
-const apiKey = process.env.TYPESAFE_API_KEY;
-if (!apiKey) {
-  console.error('TYPESAFE_API_KEY is not configured');
+const endpoint = jevEndpointFromEnv(process.env, { baseUrl: opts.baseUrl, provider: opts.provider });
+if (!endpoint.apiKey) {
+  console.error(`${endpoint.keyName} is not configured`);
   process.exit(2);
 }
 
 try {
   const result = await compactMessages(messages, {
-    apiKey,
+    apiKey: endpoint.apiKey,
+    baseUrl: endpoint.baseUrl,
     model: opts.model,
     goal,
     keepThreshold: opts.keepThreshold,
@@ -151,7 +175,7 @@ try {
   console.error(
     `kept ${s.kept}, results truncated ${s.resultsDropped}, calls dropped ${s.callsDropped}, ` +
       `pinned ${s.pinned}; ${reduction}% reduction; state ~${s.stateTokens} tokens ` +
-      `(${s.stateStage}) in ${s.requests} request(s), ${s.ms} ms`,
+      `(${s.stateStage}) in ${s.requests} request(s) to ${new URL(endpoint.baseUrl).host}, ${s.ms} ms`,
   );
 } catch (error) {
   console.error(`compaction failed: ${error instanceof Error ? error.message : String(error)}`);

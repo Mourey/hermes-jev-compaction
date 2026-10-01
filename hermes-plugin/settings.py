@@ -14,13 +14,14 @@ from typing import Any, Self, cast
 
 from agent.context_engine import ContextEngine
 
-SYSTEM_ONE_URL = "https://api.typesafe.ai/v1/systemone"
+from .endpoint import SYSTEM_ONE_URL as SYSTEM_ONE_URL
+
 DEFAULT_MODEL = "jev-1.13.0"
 FAILURE_BACKOFF_S = 300
 
 # Explicit policy boundary: never clone __dict__ (it can hold messages or keys).
 _POLICY_FIELDS = (
-    "model", "base_url", "keep_threshold", "max_state_tokens", "max_request_tokens",
+    "model", "base_url", "provider", "keep_threshold", "max_state_tokens", "max_request_tokens",
     "max_tokens", "egress_mode", "model_thresholds", "threshold_percent",
     "threshold_tokens_cap", "protect_first_n", "protect_last_n", "tail_mode",
     "emit_automatic_compaction_status",
@@ -34,7 +35,9 @@ class EngineSettings(ContextEngine):
     def __init__(self) -> None:
         self.api_key = ""
         self.model = DEFAULT_MODEL
-        self.base_url = SYSTEM_ONE_URL
+        # Empty: resolved per request (endpoint.endpoint_from), TypeSafe or OpenRouter.
+        self.base_url = ""
+        self.provider = ""
         self.keep_threshold = 0.5
         self.max_state_tokens = 25_000
         self.max_request_tokens = 30_000

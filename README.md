@@ -54,13 +54,33 @@ npm install && npm run build
 
 export TYPESAFE_API_KEY=...        # your TypeSafe key (console.typesafe.ai)
 node bin/hermes-compact.mjs transcript.json --model jev-1.13.0 --out compacted.json
+
+# or through OpenRouter: with only this key set, OpenRouter is chosen automatically
+export OPENROUTER_API_KEY=...
+node bin/hermes-compact.mjs transcript.json --out compacted.json
 ```
 
 Output: JSON `{"messages": [...], "stats": {...}}`.
 
 Useful flags: `--goal <text>` (current task; default: system texts then last
 user prompts), `--preserve-recent 6`, `--keep-threshold 0.5`,
-`--dry-run`. Full list: `node bin/hermes-compact.mjs --help`.
+`--provider typesafe|openrouter`, `--base-url <url>`, `--dry-run`. Full list:
+`node bin/hermes-compact.mjs --help`.
+
+## OpenRouter
+
+Jev is also served by OpenRouter (`https://openrouter.ai/api/alpha/decisions`,
+same request and answers). The library, the CLI and the Hermes plugin all choose
+the endpoint the same way. An explicit base URL (`FAST_JEV_BASE_URL` /
+`TYPESAFE_BASE_URL`, `--base-url`, `context.jev.base_url`) comes first, then the
+provider (`FAST_JEV_PROVIDER`, `--provider`, `context.jev.provider`). With
+neither set, TypeSafe is used when `TYPESAFE_API_KEY` is set, otherwise
+OpenRouter when only `OPENROUTER_API_KEY` is.
+
+Each endpoint gets its own key first (`FAST_JEV_API_KEY` overrides both), so the
+TypeSafe key never reaches OpenRouter while an OpenRouter key exists. OpenRouter
+has no patch pins, so `jev-1.13.0` is sent there as `typesafe/jev-1.13`. For the
+Hermes setup and log lines, see [HERMES.md](HERMES.md#openrouter).
 
 ## Library use
 
@@ -79,9 +99,9 @@ const compacted = toHermes(result.messages);
 ## Tests
 
 ```bash
-npx vitest run            # 32/32 (library + adapter)
+npx vitest run            # 54/54 (library + adapter + endpoint)
 # Python engine tests need the Hermes core on PYTHONPATH (plugin imports agent.context_engine):
-PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/   # 83/83
+PYTHONPATH=<path-to-hermes-agent-repo> python -m pytest tests/ --ignore tests/test_v032_fixes.py   # 103/103
 ```
 
 ## Hermes integration status

@@ -5,10 +5,12 @@ decisions (TypeSafe System One API): every tool call is scored, stale calls
 and results are dropped or truncated, everything kept stays verbatim.
 
 Deploy: copy this directory to ~/.hermes/plugins/jev-context-engine/ and set
-``context.engine: jev`` in config.yaml. Requires TYPESAFE_API_KEY in the
-environment (the Hermes .env is loaded into os.environ at startup).
-Config (optional, under ``context.jev``): model, keep_threshold,
-max_state_tokens, max_request_tokens.
+``context.engine: jev`` in config.yaml. Requires TYPESAFE_API_KEY or
+OPENROUTER_API_KEY in the environment (the Hermes .env is loaded into os.environ
+at startup); with only OPENROUTER_API_KEY, Jev is reached through OpenRouter.
+Config (optional, under ``context.jev``): model, provider (typesafe |
+openrouter), base_url, keep_threshold, max_state_tokens, max_request_tokens.
+Environment equivalents: FAST_JEV_PROVIDER, FAST_JEV_BASE_URL, FAST_JEV_API_KEY.
 
 Note: editing ``compression.*`` keys in config.yaml while a session is live
 may not propagate to the running engine; the values are picked up by the
@@ -30,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from .egress import metadata_input, redact_export_value
+from .endpoint import OPENROUTER_DECISIONS_URL as OPENROUTER_DECISIONS_URL
+from .endpoint import JevEndpoint, endpoint_from, host_of, model_for
 from .settings import DEFAULT_MODEL as DEFAULT_MODEL
 from .settings import FAILURE_BACKOFF_S as FAILURE_BACKOFF_S
 from .settings import SYSTEM_ONE_URL as SYSTEM_ONE_URL
@@ -624,7 +628,14 @@ class JevEngine(EngineSettings):
         try:
             state, state_tokens = self._fit_state(messages, calls)
             answers = self._ask_all(state, state_tokens, candidates)
-        except Exception:  # noqa: BLE001 — Jev down: deterministic fallback, never a lossy summary
+        except Exception as exc:  # noqa: BLE001 — Jev down: deterministic fallback, never a lossy summary
+            # Class and HTTP status only: messages can echo request content.
+            status = getattr(exc, "code", None)
+            logging.getLogger(__name__).warning(
+                "jev-context-engine: Jev via %s failed (%s%s), local fallback",
+                stats.get("endpoint", "-"), type(exc).__name__,
+                f" HTTP {status}" if isinstance(status, int) else "",
+            )
             stats["mode"] = "fallback"
             stats["error"] = "egress or Jev failure"
             self._events.append({"phase": "fallback", "reason": "transport_error"})
@@ -672,6 +683,12 @@ class JevEngine(EngineSettings):
                 "calls_dropped": sum(1 for d in by_id.values() if d == "drop_call"),
                 "state_tokens": state_tokens,
             }
+        )
+        logging.getLogger(__name__).info(
+            "jev-context-engine: Jev via %s answered %d request(s): kept %d, "
+            "results truncated %d, calls dropped %d",
+            stats.get("endpoint", "-"), stats.get("requests", 0), stats["kept"],
+            stats["results_truncated"], stats["calls_dropped"],
         )
         self._events.append(
             {
@@ -876,12 +893,17 @@ class JevEngine(EngineSettings):
         if current:
             batches.append(current)
 
+        # Resolved here, in the caller's context: worker threads lack the profile secret scope.
+        endpoint = self._endpoint()
+        self.last_stats["endpoint"] = host_of(endpoint.base_url)
+        self.last_stats["requests"] = len(batches)
+
         # ponytail: parallel batches (upstream parity), max 4 workers — TypeSafe rate limits
         def ask_one(batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
             questions: dict[str, Any] = {}
             for call in batch:
                 questions.update(self._questions(call))
-            return self._ask_jev(state, questions, batch)
+            return self._ask_jev(state, questions, batch, endpoint)
 
         answers: list[dict[str, Any]] = []
         if len(batches) > 1:
@@ -897,13 +919,14 @@ class JevEngine(EngineSettings):
         state: dict[str, Any],
         questions: dict[str, Any],
         batch: list[dict[str, Any]],
+        endpoint: JevEndpoint | None = None,
     ) -> list[dict[str, Any]]:
-        key = self.api_key.strip() if isinstance(self.api_key, str) else ""
-        if not key:
-            key = self._resolve_key()
+        if endpoint is None:
+            endpoint = self._endpoint()
+        key = endpoint.api_key
         self.api_key = key
         payload: dict[str, Any] = {
-            "model": self.model,
+            "model": model_for(endpoint.provider, self.model),
             "state": state,
             "questions": questions,
         }
@@ -911,7 +934,7 @@ class JevEngine(EngineSettings):
             payload = redact_export_value(payload)
         body = json.dumps(payload).encode()
         parsed = _http_post_json(
-            self.base_url,
+            endpoint.base_url,
             body,
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             60.0,
@@ -939,19 +962,24 @@ class JevEngine(EngineSettings):
             )
         return out
 
-    @staticmethod
-    def _resolve_key() -> str:
+    def _endpoint(self) -> JevEndpoint:
+        """Endpoint and key: engine settings first, then the profile secret scope."""
         try:
             from agent.secret_scope import get_secret
 
-            key = get_secret("TYPESAFE_API_KEY")
+            endpoint = endpoint_from(
+                get_secret,
+                api_key=self.api_key if isinstance(self.api_key, str) else "",
+                base_url=self.base_url if isinstance(self.base_url, str) else "",
+                provider=self.provider if isinstance(self.provider, str) else "",
+            )
         except Exception:  # noqa: BLE001 — secret-scope failure must fail closed
             raise RuntimeError(
-                "TYPESAFE_API_KEY unavailable from profile secret scope"
+                "Jev endpoint or key unavailable from profile secret scope"
             ) from None
-        if not isinstance(key, str) or not key.strip():
-            raise RuntimeError("TYPESAFE_API_KEY is not configured")
-        return key.strip()
+        if not endpoint.api_key:
+            raise RuntimeError(f"{endpoint.key_name} is not configured")
+        return endpoint
 
     def _decide(self, answer: dict[str, Any]) -> str:
         if answer["keepResult"] >= self.keep_threshold:
@@ -1346,6 +1374,8 @@ def register(ctx: Any) -> None:
         )
         jev_cfg = (cfg.get("context") or {}).get("jev") or {}
         engine.model = jev_cfg.get("model", engine.model)
+        engine.provider = str(jev_cfg.get("provider") or "")
+        engine.base_url = str(jev_cfg.get("base_url") or "")
         engine.keep_threshold = float(
             jev_cfg.get("keep_threshold", engine.keep_threshold)
         )
