@@ -28,7 +28,6 @@
     "dist",
     "codex",
     ".codex-plugin",
-    "plugin.json",
     "src",
     "pi",
     "README.md",
@@ -43,12 +42,14 @@
     "typecheck:hooks": "tsc -p tsconfig.hooks.json",
     "typecheck:pi": "tsc -p tsconfig.pi.json",
     "smoke:pi": "node scripts/smoke-pi.mjs",
-    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json"
+    "validate:plugin": "claude plugin validate .claude-plugin/plugin.json",
+    "build:codex": "esbuild src/codex-hook.ts --bundle --platform=node --format=esm --target=node18 --legal-comments=none --outfile=codex/codex-hook.mjs"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "~0.85.1",
     "@earendil-works/pi-coding-agent": "~0.85.1",
     "@types/node": "^22.10.2",
+    "esbuild": "^0.28.2",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

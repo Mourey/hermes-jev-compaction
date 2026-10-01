@@ -321,23 +321,30 @@ just the repo's `.claude-plugin/marketplace.json`.
 
 ## Codex plugin
 
-The repository also contains a native Agent Plugins manifest (`plugin.json`),
-a `.codex-plugin` compatibility manifest, and Codex lifecycle hooks. Codex does
-not currently let a hook replace the compacted message history. Instead, the
-plugin records stable `UserPromptSubmit` and `PostToolUse` events, lets Codex
-perform its built-in compaction, then uses Jev to restore selected verbatim
-context through the post-compaction `SessionStart` hook.
+The repository also contains a Codex plugin manifest (`.codex-plugin/plugin.json`)
+whose `hooks` field points at `codex/hooks.json`. Codex does not currently let
+a hook replace the compacted message history. Instead, the plugin records
+stable `UserPromptSubmit` and `PostToolUse` events, lets Codex perform its
+built-in compaction, then uses Jev to restore selected verbatim context through
+the post-compaction `SessionStart` hook (source `compact`).
 
-Build before packaging or installing from a local marketplace so the hook
-runtime exists at `dist/codex-hook.js`:
+The hook runs `codex/codex-hook.mjs`, a committed single-file bundle of
+`src/codex-hook.ts`, so a Git or local-marketplace install needs no build step.
+After changing `src/`, run `npm run build:codex`; a test fails while the bundle
+is stale.
 
 ```sh
-npm install
-npm run build
-export TYPESAFE_API_KEY=...
+codex plugin marketplace add Mourey/fast-jev-compaction   # or a local checkout path
+codex plugin add fast-jev-compaction@fast-jev-compaction
+export OPENROUTER_API_KEY=...   # or TYPESAFE_API_KEY; see "Choosing the endpoint"
 ```
 
-Codex asks you to review and trust bundled hooks before they run. Captured hook
+Do not add a root `plugin.json` with the Agent Plugins `$schema`: Codex 0.159
+prefers it over `.codex-plugin/plugin.json` and loads no hooks from it.
+
+Codex asks you to review and trust bundled hooks before they run (`codex exec`
+skips untrusted hooks silently; `--dangerously-bypass-hook-trust` runs them for
+one invocation). Captured hook
 records are stored per session under Codex's `PLUGIN_DATA` directory and are
 cleared after a successful restoration. Optional environment variables are
 `FAST_JEV_MODEL`, `FAST_JEV_KEEP_THRESHOLD`,

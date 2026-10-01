@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Core TypeScript lives in `src/`; `src/index.ts` is the package export surface. Claude Code integration belongs in `hooks/`, while Codex packaging uses `plugin.json`, `.codex-plugin/`, and `codex/`. Host type shims are in `types/`, tests in `tests/`, and runnable examples in `examples/`. The standalone SwiftUI animation is under `demo/JevDemo/`. Generated JavaScript and declarations go to `dist/` and must not be edited directly.
+Core TypeScript lives in `src/`; `src/index.ts` is the package export surface. Claude Code integration belongs in `hooks/`, while Codex packaging uses `.codex-plugin/` and `codex/` (the hook runs the committed bundle `codex/codex-hook.mjs`; rebuild it with `npm run build:codex`). Host type shims are in `types/`, tests in `tests/`, and runnable examples in `examples/`. The standalone SwiftUI animation is under `demo/JevDemo/`. Generated JavaScript and declarations go to `dist/` and must not be edited directly.
 
 ## Build, Test, and Development Commands
 
